@@ -151,7 +151,10 @@ To set up from scratch:
 To release a new version:
 1. Bump `version` in `pyproject.toml`
 2. `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -m build`
-3. `PYPI_TOKEN=$(grep pypi_token .env | awk '{print $2}') && twine upload dist/* -u __token__ -p "$PYPI_TOKEN"`
+3. **Before uploading**, verify the sdist contains no credentials:
+   `tar tzf dist/*.tar.gz | grep -E '\.env|\.db|secret|token|key'`
+   The only expected match is the package source files. If `.env` appears, stop — do not upload.
+4. `PYPI_TOKEN=$(grep pypi_token .env | awk '{print $2}') && twine upload dist/* -u __token__ -p "$PYPI_TOKEN"`
 
 The PyPI token is stored as `pypi_token` in `.env`. If upload returns 403, the token has expired — generate a new one at pypi.org/manage/account/token/ scoped to `jarrah-gads-mcp`.
 
