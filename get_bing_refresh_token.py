@@ -21,7 +21,7 @@ import json
 CLIENT_ID = "f9229c70-7bec-4564-999f-7aa28d5613ab"
 CLIENT_SECRET = "REDACTED"
 REDIRECT_URI = "http://localhost:8080"
-SCOPE = "https://ads.microsoft.com/ads.manage offline_access"
+SCOPE = "https://ads.microsoft.com/msads.manage offline_access"
 
 auth_code = None
 
@@ -61,11 +61,11 @@ auth_url = (
 print("Opening browser for Microsoft login...")
 webbrowser.open(auth_url)
 
-thread.join(timeout=120)
+thread.join(timeout=300)
 server.server_close()
 
 if not auth_code:
-    print("ERROR: No auth code received. Did you complete the login within 2 minutes?")
+    print("ERROR: No auth code received. Did you complete the login within 5 minutes?")
     exit(1)
 
 print("Auth code received. Exchanging for tokens...")

@@ -90,6 +90,12 @@ def init_db() -> None:
                 login_customer_id   TEXT,
                 expires_at          INTEGER
             );
+
+            CREATE TABLE IF NOT EXISTS kv (
+                key         TEXT PRIMARY KEY,
+                value       TEXT NOT NULL,
+                updated_at  INTEGER NOT NULL DEFAULT (unixepoch())
+            );
         """)
         conn.commit()
 
@@ -281,6 +287,19 @@ def get_refresh_token_row(token: str) -> dict | None:
 
 def delete_refresh_token(token: str) -> None:
     _exec("DELETE FROM oauth_refresh_tokens WHERE token = ?", (token,))
+
+
+def kv_get(key: str) -> str | None:
+    row = _exec("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def kv_set(key: str, value: str) -> None:
+    _exec(
+        "INSERT INTO kv (key, value, updated_at) VALUES (?, ?, unixepoch()) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        (key, value),
+    )
 
 
 def update_token_account(

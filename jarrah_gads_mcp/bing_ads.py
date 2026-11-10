@@ -1,6 +1,7 @@
 """Microsoft Advertising (Bing Ads) API client wrapper."""
 from __future__ import annotations
 
+import hashlib
 import io
 import logging
 import os
@@ -17,30 +18,185 @@ log = logging.getLogger(__name__)
 DEVELOPER_TOKEN = os.environ.get("BING_DEVELOPER_TOKEN", "")
 CLIENT_ID       = os.environ.get("BING_CLIENT_ID", "")
 CLIENT_SECRET   = os.environ.get("BING_CLIENT_SECRET", "")
-REFRESH_TOKEN   = os.environ.get("BING_REFRESH_TOKEN", "")
+
+# Env token is the bootstrap value (Fly secret). Microsoft often rotates the
+# refresh token and invalidates the previous one. A rotated token is persisted
+# in SQLite, keyed to the fingerprint of the env token that started the chain,
+# so a restart keeps the live token and a new Fly secret starts a new chain.
+_env_refresh_token = os.environ.get("BING_REFRESH_TOKEN", "")
+_refresh_token: dict[str, str] = {"value": ""}
+_refresh_token_loaded = False
+
+
+def _token_fingerprint(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _ensure_refresh_token() -> str:
+    """Return the live refresh token, preferring a persisted rotation of the current env token."""
+    global _refresh_token_loaded
+    if _refresh_token_loaded and _refresh_token["value"]:
+        return _refresh_token["value"]
+
+    token = _env_refresh_token
+    if _env_refresh_token:
+        try:
+            from jarrah_gads_mcp import db as _db
+            from jarrah_gads_mcp.auth_provider import decrypt
+
+            _db.init_db()
+            stored = _db.kv_get("bing_refresh_token")
+            source = _db.kv_get("bing_refresh_token_source")
+            if stored and source == _token_fingerprint(_env_refresh_token):
+                token = decrypt(stored)
+                log.info("Using persisted Bing Ads refresh token")
+        except Exception:
+            log.warning("Could not load persisted Bing refresh token; using env value", exc_info=True)
+
+    _refresh_token["value"] = token
+    _refresh_token_loaded = True
+    return token
+
+
+def _persist_refresh_token(new_rt: str) -> None:
+    """Store a rotated refresh token so it survives process restarts."""
+    if not _env_refresh_token:
+        return
+    try:
+        from jarrah_gads_mcp import db as _db
+        from jarrah_gads_mcp.auth_provider import encrypt
+
+        _db.init_db()
+        _db.kv_set("bing_refresh_token", encrypt(new_rt))
+        _db.kv_set("bing_refresh_token_source", _token_fingerprint(_env_refresh_token))
+        log.info("Persisted rotated Bing Ads refresh token")
+    except Exception:
+        log.warning("Failed to persist rotated Bing refresh token", exc_info=True)
+
+
+def _exchange_refresh_token() -> str:
+    """Exchange the stored refresh token for an access token using urllib directly.
+
+    Bypasses the bingads SDK's internal OAuth flow so we control the exact
+    scope string and avoid any SDK version quirks.  If Microsoft rotates the
+    refresh token, the new value is kept in memory and written to SQLite.
+    """
+    import json
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    data = urllib.parse.urlencode({
+        "grant_type": "refresh_token",
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "refresh_token": _ensure_refresh_token(),
+        "scope": "https://ads.microsoft.com/msads.manage offline_access",
+    }).encode()
+
+    req = urllib.request.Request(
+        "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req) as r:
+            tokens = json.loads(r.read())
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode()
+        raise RuntimeError(f"Bing Ads token exchange failed ({exc.code}): {body}") from exc
+
+    if "access_token" not in tokens:
+        raise RuntimeError(f"Bing Ads token exchange returned no access_token: {tokens}")
+
+    new_rt = tokens.get("refresh_token")
+    if new_rt and new_rt != _refresh_token["value"]:
+        log.info("Bing Ads refresh token rotated")
+        _refresh_token["value"] = new_rt
+        _persist_refresh_token(new_rt)
+
+    return tokens["access_token"]
+
+
+def _patch_service_headers() -> None:
+    """Omit empty CustomerId headers.
+
+    The SDK stringifies a missing id to "None", and Microsoft rejects that as
+    invalid client data. Account-discovery calls have no customer id yet.
+    """
+    from bingads.manifest import USER_AGENT
+    from bingads.service_client import ServiceClient
+
+    if getattr(ServiceClient, "_jarrah_headers", False):
+        return
+
+    @staticmethod
+    def _ensemble_header(authorization_data, **kwargs):
+        if "soapheaders" in kwargs:
+            raise Exception("cannot pass in kwargs contains soapheaders")
+        if authorization_data is None:
+            return kwargs
+        headers = {"DeveloperToken": authorization_data.developer_token}
+        if authorization_data.customer_id not in (None, ""):
+            headers["CustomerId"] = str(authorization_data.customer_id)
+        if authorization_data.account_id not in (None, ""):
+            headers["CustomerAccountId"] = str(authorization_data.account_id)
+        authorization_data.authentication.enrich_headers(headers)
+        kwargs["soapheaders"] = headers
+        kwargs["headers"] = {"User-Agent": USER_AGENT}
+        return kwargs
+
+    ServiceClient._ensemble_header = _ensemble_header
+    ServiceClient._jarrah_headers = True
+
+
+def _developer_token() -> str:
+    token = os.environ.get("BING_DEVELOPER_TOKEN", "") or DEVELOPER_TOKEN
+    if not token:
+        raise RuntimeError("BING_DEVELOPER_TOKEN is not configured")
+    return token
 
 
 def _auth(account_id: int | None = None, customer_id: int | None = None):
-    """Build an AuthorizationData object using the shared refresh token."""
-    from bingads import AuthorizationData, OAuthWebAuthCodeGrant
+    """Build an AuthorizationData object with a pre-fetched access token.
 
+    Fetches the access token ourselves (bypassing bingads SDK OAuth) so the
+    scope and token format are guaranteed to match what Microsoft expects.
+    """
+    from bingads import AuthorizationData, OAuthWebAuthCodeGrant
+    from bingads.authorization import OAuthTokens
+
+    _patch_service_headers()
+    access_token = _exchange_refresh_token()
+
+    # oauth_tokens is a read-only property; pass the tokens to the constructor.
     oauth = OAuthWebAuthCodeGrant(
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
         redirection_uri="http://localhost:8080",
+        oauth_tokens=OAuthTokens(
+            access_token=access_token,
+            access_token_expires_in_seconds=3600,
+            refresh_token=_refresh_token["value"],
+        ),
         env="production",
     )
-    oauth.request_oauth_tokens_by_refresh_token(REFRESH_TOKEN)
 
-    auth_data = AuthorizationData(
-        developer_token=DEVELOPER_TOKEN,
+    return AuthorizationData(
+        developer_token=_developer_token(),
         authentication=oauth,
+        account_id=account_id,
+        customer_id=customer_id,
     )
-    if account_id is not None:
-        auth_data.account_id = account_id
-    if customer_id is not None:
-        auth_data.customer_id = customer_id
-    return auth_data
+
+
+def _as_list(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
 
 
 def list_accounts() -> list[dict]:
@@ -53,22 +209,53 @@ def list_accounts() -> list[dict]:
         authorization_data=_auth(),
         environment="production",
     )
-    resp = svc.GetAccountsInfo()
-    raw = (
-        getattr(getattr(resp, "AccountInfoWithCustomerData", None),
-                "AccountInfoWithCustomerData", None)
-        or []
-    )
-    return [
+    user = svc.GetUser(UserId=None).User
+    predicates = {
+        "Predicate": [
+            {"Field": "UserId", "Operator": "Equals", "Value": user.Id},
+        ]
+    }
+
+    found: list = []
+    page_index = 0
+    page_size = 100
+    while True:
+        resp = svc.SearchAccounts(
+            PageInfo={"Index": page_index, "Size": page_size},
+            Predicates=predicates,
+        )
+        batch = _as_list(getattr(resp, "AdvertiserAccount", None))
+        found.extend(batch)
+        if len(batch) < page_size:
+            break
+        page_index += 1
+
+    accounts = [
         {
-            "id": str(a.AccountId),
-            "name": a.AccountName,
-            "number": a.AccountNumber,
-            "customer_id": str(a.CustomerId),
+            "id": str(a.Id),
+            "name": a.Name,
+            "number": a.Number,
+            "customer_id": str(a.ParentCustomerId),
             "status": str(a.AccountLifeCycleStatus),
         }
-        for a in raw
+        for a in found
     ]
+    _customers_by_account.update({a["id"]: int(a["customer_id"]) for a in accounts})
+    return accounts
+
+
+_customers_by_account: dict[str, int] = {}
+
+
+def _customer_id_for(account_id: int) -> int:
+    key = str(account_id)
+    if key not in _customers_by_account:
+        list_accounts()
+    if key not in _customers_by_account:
+        raise RuntimeError(
+            f"Bing Ads account {account_id} is not accessible to the signed-in Microsoft user"
+        )
+    return _customers_by_account[key]
 
 
 # ---------------------------------------------------------------------------
@@ -80,40 +267,55 @@ def _reporting_svc(account_id: int):
     return ServiceClient(
         "ReportingService",
         version=13,
-        authorization_data=_auth(account_id=account_id),
+        authorization_data=_auth(
+            account_id=account_id,
+            customer_id=_customer_id_for(account_id),
+        ),
         environment="production",
     )
 
 
 def _make_time(svc, start: date, end: date):
     t = svc.factory.create("ReportTime")
-    cs = svc.factory.create("CustomDateRangeStart")
+    cs = svc.factory.create("Date")
     cs.Day, cs.Month, cs.Year = start.day, start.month, start.year
     t.CustomDateRangeStart = cs
-    ce = svc.factory.create("CustomDateRangeEnd")
+    ce = svc.factory.create("Date")
     ce.Day, ce.Month, ce.Year = end.day, end.month, end.year
     t.CustomDateRangeEnd = ce
     return t
 
 
-def _acct_ids(svc, account_id: int):
-    arr = svc.factory.create("ArrayOflong")
-    arr.long = [account_id]
-    return arr
+def _acct_ids(account_id: int):
+    # ArrayOflong lives in the serialization namespace, which suds will not
+    # create under the bare name. A long-array dict is the shape the SDK sends.
+    return {"long": [account_id]}
+
+
+def _clear_empty_enums(report_request) -> None:
+    """Drop unset suds enums so Microsoft does not receive an empty value."""
+    report_time = getattr(report_request, "Time", None)
+    if report_time is None:
+        return
+    for name in ("PredefinedTime", "ReportTimeZone"):
+        value = getattr(report_time, name, None)
+        if value is not None and getattr(value, "value", None) is None:
+            setattr(report_time, name, None)
 
 
 def _submit_and_download(svc, report_request) -> pd.DataFrame:
     """Submit report, poll until ready, download zip, return parsed DataFrame."""
-    submit_resp = svc.SubmitGenerateReport(ReportRequest=report_request)
-    report_id = submit_resp.ReportRequestId
+    _clear_empty_enums(report_request)
+    report_id = svc.SubmitGenerateReport(ReportRequest=report_request)
 
     deadline = time.time() + 120
     download_url: str | None = None
     while time.time() < deadline:
         poll = svc.PollGenerateReport(ReportRequestId=report_id)
-        status = poll.ReportRequestStatus.Status
+        status_obj = getattr(poll, "ReportRequestStatus", poll)
+        status = status_obj.Status
         if status == "Success":
-            download_url = poll.ReportRequestStatus.ReportDownloadUrl
+            download_url = status_obj.ReportDownloadUrl
             break
         if status in ("Error", "Failed"):
             raise RuntimeError(f"Bing Ads report failed with status: {status}")
@@ -173,7 +375,6 @@ def fetch_campaign_metrics(
 
     rq = svc.factory.create("CampaignPerformanceReportRequest")
     rq.Format = "Csv"
-    rq.Language = "English"
     rq.ReportName = "CampaignPerformance"
     rq.ReturnOnlyCompleteData = False
     rq.Aggregation = "Daily"
@@ -188,7 +389,7 @@ def fetch_campaign_metrics(
     rq.Columns = cols
 
     scope = svc.factory.create("AccountThroughCampaignReportScope")
-    scope.AccountIds = _acct_ids(svc, aid)
+    scope.AccountIds = _acct_ids(aid)
     rq.Scope = scope
 
     rq.Time = _make_time(svc, start_date, end_date)
@@ -206,23 +407,21 @@ def fetch_keyword_performance(
 
     rq = svc.factory.create("KeywordPerformanceReportRequest")
     rq.Format = "Csv"
-    rq.Language = "English"
     rq.ReportName = "KeywordPerformance"
     rq.ReturnOnlyCompleteData = False
     rq.Aggregation = "Summary"
-    rq.MaxOrMinBidOption = "MaxBid"
     rq.ExcludeReportHeader = True
     rq.ExcludeReportFooter = True
 
     cols = svc.factory.create("ArrayOfKeywordPerformanceReportColumn")
     cols.KeywordPerformanceReportColumn = [
-        "CampaignName", "AdGroupName", "Keyword", "MatchType",
+        "CampaignName", "AdGroupName", "Keyword", "BidMatchType",
         "Impressions", "Clicks", "Spend", "AverageCpc", "Ctr", "QualityScore",
     ]
     rq.Columns = cols
 
     scope = svc.factory.create("AccountThroughAdGroupReportScope")
-    scope.AccountIds = _acct_ids(svc, aid)
+    scope.AccountIds = _acct_ids(aid)
     rq.Scope = scope
 
     rq.Time = _make_time(svc, start_date, end_date)
@@ -237,7 +436,10 @@ def fetch_ad_creative(account_id: str) -> list[dict]:
     svc = ServiceClient(
         "CampaignManagementService",
         version=13,
-        authorization_data=_auth(account_id=aid),
+        authorization_data=_auth(
+            account_id=aid,
+            customer_id=_customer_id_for(aid),
+        ),
         environment="production",
     )
 
