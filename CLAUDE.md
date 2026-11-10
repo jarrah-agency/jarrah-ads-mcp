@@ -4,9 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A remote HTTP MCP server exposing Google Ads tools. Users authenticate with their own Google accounts
-via OAuth 2.0, select a Google Ads account, and the server issues MCP bearer tokens that carry their
-credentials. Published to PyPI as `jarrah-gads-mcp`.
+A remote HTTP MCP server exposing Google Ads and Microsoft Advertising (Bing Ads) tools. Users
+authenticate with their own Google accounts via OAuth 2.0, select a Google Ads account, and the
+server issues MCP bearer tokens that carry their credentials. Bing Ads tools use a single shared
+refresh token stored in env vars (no per-user OAuth). Published to PyPI as `jarrah-gads-mcp`.
 
 Derived from the Parabola AI app (`jarrah-agency/parabola-ai`) — `google_ads.py` and `google_ads_tools.py`
 are taken from that codebase.
@@ -43,6 +44,7 @@ jarrah_gads_mcp/
   server.py        — FastMCP server with auth, tools, and custom routes
   google_ads.py    — GoogleAdsClient wrapper + fetch_* functions returning DataFrames
   google_ads_tools.py — run_gaql() async wrapper with JSON output
+  bing_ads.py      — Bing Ads SOAP client wrapper (shared credentials, no per-user OAuth)
 ```
 
 Root-level `server.py` is the original stdio version kept for reference; `jarrah_gads_mcp/server.py`
@@ -115,6 +117,18 @@ middleware that rewrites `scope["path"]` from `/` to `/mcp` before the request r
 | `get_ad_creative` | RSA headlines, descriptions, final URLs for all active ads |
 | `generate_keyword_ideas` | Keyword Planner: discover new keywords from seeds/URL with volume, competition, bid estimates |
 | `get_keyword_historical_metrics` | Keyword Planner: fetch metrics for a known list of keywords |
+| `bing_list_accounts` | List all Microsoft Advertising accounts accessible with the shared credentials |
+| `bing_get_campaign_metrics` | Bing campaign daily spend, impressions, clicks, CTR, avg CPC |
+| `bing_get_keyword_performance` | Bing keyword clicks, spend, avg CPC, CTR, quality score |
+| `bing_get_ad_creative` | Bing RSA headlines/descriptions and ETA title/text |
+
+### Bing Ads notes
+
+- Uses the `bingads` Python SDK (SOAP). Auth uses a single shared refresh token from `BING_REFRESH_TOKEN` env var — no per-user OAuth.
+- `bing_ads.py` module-level vars (`DEVELOPER_TOKEN`, `CLIENT_ID`, etc.) are set from `os.environ.get()` at import time.
+- Reporting tools submit a report, poll up to 120 seconds, download the zip, parse the CSV. Reports with `ExcludeReportHeader=True` and `ExcludeReportFooter=True` produce clean CSVs with just headers + data rows.
+- `bing_list_accounts` returns account `id` values required by the other Bing tools.
+- Bing Ads required env vars: `BING_DEVELOPER_TOKEN`, `BING_CLIENT_ID`, `BING_CLIENT_SECRET`, `BING_REFRESH_TOKEN`.
 
 ### Keyword Planner notes
 

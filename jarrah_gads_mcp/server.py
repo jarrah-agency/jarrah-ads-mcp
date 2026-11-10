@@ -388,6 +388,93 @@ async def get_ad_creative() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Bing Ads Tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def bing_list_accounts() -> list[dict]:
+    """List all Microsoft Advertising accounts accessible with the configured credentials.
+
+    Returns a list of {id, name, number, customer_id, status} dicts.
+    Use the 'id' value as the account_id parameter for other bing_* tools.
+    """
+    def _sync():
+        from jarrah_gads_mcp.bing_ads import list_accounts
+        return list_accounts()
+
+    return await asyncio.to_thread(_sync)
+
+
+@mcp.tool()
+async def bing_get_campaign_metrics(
+    account_id: str,
+    start_date: str,
+    end_date: str,
+) -> list[dict]:
+    """Get Microsoft Advertising campaign performance metrics.
+
+    Args:
+        account_id: Bing Ads account ID (get from bing_list_accounts).
+        start_date: Start date in YYYY-MM-DD format.
+        end_date: End date in YYYY-MM-DD format.
+
+    Returns daily spend, impressions, clicks, CTR, and avg CPC per campaign.
+    """
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+
+    def _sync():
+        from jarrah_gads_mcp.bing_ads import fetch_campaign_metrics
+        df = fetch_campaign_metrics(account_id, start, end)
+        return df.to_dict(orient="records")
+
+    return await asyncio.to_thread(_sync)
+
+
+@mcp.tool()
+async def bing_get_keyword_performance(
+    account_id: str,
+    start_date: str,
+    end_date: str,
+) -> list[dict]:
+    """Get Microsoft Advertising keyword performance metrics.
+
+    Args:
+        account_id: Bing Ads account ID (get from bing_list_accounts).
+        start_date: Start date in YYYY-MM-DD format.
+        end_date: End date in YYYY-MM-DD format.
+
+    Returns clicks, spend, avg CPC, CTR, and quality score per keyword/match type.
+    """
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+
+    def _sync():
+        from jarrah_gads_mcp.bing_ads import fetch_keyword_performance
+        df = fetch_keyword_performance(account_id, start, end)
+        return df.to_dict(orient="records")
+
+    return await asyncio.to_thread(_sync)
+
+
+@mcp.tool()
+async def bing_get_ad_creative(account_id: str) -> list[dict]:
+    """Get Microsoft Advertising ad creative for all active ads.
+
+    Args:
+        account_id: Bing Ads account ID (get from bing_list_accounts).
+
+    Returns headlines, descriptions, and final URLs for responsive search ads
+    and title/text for expanded text ads.
+    """
+    def _sync():
+        from jarrah_gads_mcp.bing_ads import fetch_ad_creative
+        return fetch_ad_creative(account_id)
+
+    return await asyncio.to_thread(_sync)
+
+
+# ---------------------------------------------------------------------------
 # Google OAuth callback — custom routes (bypass MCP auth)
 # ---------------------------------------------------------------------------
 
