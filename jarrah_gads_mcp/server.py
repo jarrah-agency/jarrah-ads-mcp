@@ -294,6 +294,13 @@ async def get_quality_scores() -> list[dict]:
     return await asyncio.to_thread(_sync)
 
 
+# TODO: Remove generate_keyword_ideas and get_keyword_historical_metrics once Standard Access
+# is approved, or replace with a third-party keyword API (DataForSEO, SemRush, etc.).
+# These tools are non-functional under Basic Access — KeywordPlanIdeaService has a separate
+# quota that is too tight for production use regardless of the general 15,000 ops/day limit.
+# Google rejected Standard Access upgrade (Nov 2026) citing insufficient traffic. Reapply once
+# the other tools have meaningful usage, or swap to a keyword data provider that doesn't require
+# Google Ads API Standard Access.
 @mcp.tool()
 async def generate_keyword_ideas(
     keywords: list[str],
