@@ -115,8 +115,8 @@ middleware that rewrites `scope["path"]` from `/` to `/mcp` before the request r
 | `get_conversion_actions` | Enabled conversions with 90-day volume |
 | `get_quality_scores` | Keyword QS (1–10) with ad relevance, landing page, expected CTR |
 | `get_ad_creative` | RSA headlines, descriptions, final URLs for all active ads |
-| `generate_keyword_ideas` | Keyword Planner: discover new keywords from seeds/URL with volume, competition, bid estimates |
-| `get_keyword_historical_metrics` | Keyword Planner: fetch metrics for a known list of keywords |
+| `generate_keyword_ideas` | **Non-functional under Basic API access (quota exhausted). Pending removal — see TODO in server.py.** |
+| `get_keyword_historical_metrics` | **Non-functional under Basic API access (quota exhausted). Pending removal — see TODO in server.py.** |
 | `bing_list_accounts` | List all Microsoft Advertising accounts accessible with the shared credentials |
 | `bing_get_campaign_metrics` | Bing campaign daily spend, impressions, clicks, CTR, avg CPC |
 | `bing_get_keyword_performance` | Bing keyword clicks, spend, avg CPC, CTR, quality score |
@@ -125,12 +125,18 @@ middleware that rewrites `scope["path"]` from `/` to `/mcp` before the request r
 ### Bing Ads notes
 
 - Uses the `bingads` Python SDK (SOAP). Auth uses a single shared refresh token from `BING_REFRESH_TOKEN` env var — no per-user OAuth.
-- `bing_ads.py` module-level vars (`DEVELOPER_TOKEN`, `CLIENT_ID`, etc.) are set from `os.environ.get()` at import time.
-- Reporting tools submit a report, poll up to 120 seconds, download the zip, parse the CSV. Reports with `ExcludeReportHeader=True` and `ExcludeReportFooter=True` produce clean CSVs with just headers + data rows.
+- Required env vars: `BING_DEVELOPER_TOKEN`, `BING_CLIENT_ID`, `BING_CLIENT_SECRET`, `BING_REFRESH_TOKEN`. All four must be set — a missing `BING_DEVELOPER_TOKEN` causes "Invalid client data" errors even if OAuth succeeds.
+- **Token rotation**: Microsoft rotates the refresh token on each use. `_exchange_refresh_token()` in `bing_ads.py` fetches the access token directly via `urllib` (bypassing the SDK's OAuth flow to control the exact scope). Rotated tokens are persisted in the SQLite `kv` table (keys `bing_refresh_token` / `bing_refresh_token_source`) so they survive process restarts. The `kv` table is keyed to a SHA-256 fingerprint of the env token, so a new Fly secret starts a fresh chain. **Do not run local token-exchange tests against the production `BING_REFRESH_TOKEN` — each use invalidates the previous token and can break the entire token family.**
+- **Account lookup**: `list_accounts` uses `CustomerManagementService.SearchAccounts` with a user-ID predicate (not `GetAccountsInfo`). Customer IDs are cached in `_customers_by_account` and injected into reporting/management service calls.
+- **SDK SOAP header patch**: `_patch_service_headers()` overrides the SDK's header builder to omit `CustomerId`/`CustomerAccountId` fields when they are `None` — the SDK otherwise serialises them as the string `"None"` which Microsoft rejects.
+- **Report requests**: `CustomDateRangeStart/End` use the `Date` SOAP type (not named types). `AccountIds` is passed as `{"long": [account_id]}` (not `svc.factory.create("ArrayOflong")`). Keyword reports use `BidMatchType` not `MatchType`. `Language` and `MaxOrMinBidOption` fields are omitted.
+- Reporting tools submit a report, poll up to 120 seconds, download the zip, parse the CSV. `ExcludeReportHeader=True` / `ExcludeReportFooter=True` produce clean CSVs; `_parse_report_csv` drops the trailing Total row.
 - `bing_list_accounts` returns account `id` values required by the other Bing tools.
-- Bing Ads required env vars: `BING_DEVELOPER_TOKEN`, `BING_CLIENT_ID`, `BING_CLIENT_SECRET`, `BING_REFRESH_TOKEN`.
+- To regenerate the refresh token: `python3 get_bing_refresh_token.py` (uses authorization_code flow, safe to run without invalidating Fly's token).
 
 ### Keyword Planner notes
+
+**These tools are non-functional under Basic API access and are pending removal.** `KeywordPlanIdeaService` has a separate, very tight quota that is exhausted immediately regardless of the general 15,000 ops/day Basic limit. Google rejected a Standard Access upgrade application in Nov 2026 (insufficient traffic). Reapply once other tool usage grows, or replace with a third-party keyword API (DataForSEO, SemRush). See TODO comment above `generate_keyword_ideas` in `server.py`.
 
 - Uses `KeywordPlanIdeaService.GenerateKeywordIdeas` — **not** `search` or `search_stream`.
 - Geo targeting uses a hardcoded `_COUNTRY_GEO_ID` dict in `google_ads.py` (ISO 3166-1 alpha-2 →
@@ -138,8 +144,6 @@ middleware that rewrites `scope["path"]` from `/` to `/mcp` before the request r
   `location_names` or `geo_targets` in the request body and errors if only `country_code` is set.
 - Seed objects (`KeywordSeed`, `UrlSeed`, `KeywordAndUrlSeed`) use proto-plus and do **not** have
   `CopyFrom()`. Set fields directly on `request.keyword_seed`, `request.url_seed`, etc.
-- `KeywordPlanIdeaService` has tight daily quotas on Test/Basic developer token access levels.
-  Apply for Standard access in the Google Ads API Center for production use.
 
 ## Deploying to Fly.io
 
@@ -187,6 +191,7 @@ Note: Fly.io deploys install from local source via Docker (`pip install .`), so 
 
 - `db.py` uses `threading.RLock()` (not `Lock()`) — `init_db()` acquires the lock then calls
   `_get_conn()` which also acquires it; a non-reentrant lock would deadlock on startup.
+- `db.py` has a general-purpose `kv` table (keys: `bing_refresh_token`, `bing_refresh_token_source`) used to persist rotated Bing refresh tokens across restarts. Access via `kv_get(key)` / `kv_set(key, value)`.
 - The Fly.io free tier machine (256 MB) is too small — the Google Ads gRPC library spikes memory
   during tool calls. Run at 512 MB minimum.
 - Health check timeout is 5s; long-running Google Ads API calls can cause a single check to fail.
