@@ -30,6 +30,11 @@ On first use the client opens Google sign-in. One accessible Ads account is sele
 | `get_ad_creative` | RSA headlines, descriptions, and final URLs for active ads |
 | `generate_keyword_ideas` | Keyword Planner ideas from seed keywords and/or a URL, with volume, competition, and bid estimates |
 | `get_keyword_historical_metrics` | Keyword Planner metrics for a known keyword list |
+| `bing_list_accounts` | List Microsoft Advertising accounts accessible with the configured credentials |
+| `bing_get_campaign_metrics` | Bing campaign daily spend, impressions, clicks, CTR, avg CPC, conversions, and revenue |
+| `bing_get_keyword_performance` | Bing keyword clicks, spend, avg CPC, CTR, quality score, conversions, and revenue |
+| `bing_get_ad_creative` | Bing RSA headlines/descriptions and ETA title/text |
+| `bing_run_report` | Flexible Bing Ads report with caller-supplied report type, columns, date range, and aggregation — use `ConversionPerformanceReportRequest` for goal breakdowns |
 
 ## Query notes
 

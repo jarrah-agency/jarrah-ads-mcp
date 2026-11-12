@@ -118,9 +118,10 @@ middleware that rewrites `scope["path"]` from `/` to `/mcp` before the request r
 | `generate_keyword_ideas` | **Non-functional under Basic API access (quota exhausted). Pending removal — see TODO in server.py.** |
 | `get_keyword_historical_metrics` | **Non-functional under Basic API access (quota exhausted). Pending removal — see TODO in server.py.** |
 | `bing_list_accounts` | List all Microsoft Advertising accounts accessible with the shared credentials |
-| `bing_get_campaign_metrics` | Bing campaign daily spend, impressions, clicks, CTR, avg CPC |
-| `bing_get_keyword_performance` | Bing keyword clicks, spend, avg CPC, CTR, quality score |
+| `bing_get_campaign_metrics` | Bing campaign daily spend, impressions, clicks, CTR, avg CPC, conversions, and revenue |
+| `bing_get_keyword_performance` | Bing keyword clicks, spend, avg CPC, CTR, quality score, conversions, and revenue |
 | `bing_get_ad_creative` | Bing RSA headlines/descriptions and ETA title/text |
+| `bing_run_report` | Flexible Bing Ads report with caller-supplied report type, columns, date range, and aggregation; supports ConversionPerformanceReportRequest for goal breakdowns |
 
 ### Bing Ads notes
 

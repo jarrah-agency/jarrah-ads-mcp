@@ -481,6 +481,55 @@ async def bing_get_ad_creative(account_id: str) -> list[dict]:
     return await asyncio.to_thread(_sync)
 
 
+@mcp.tool()
+async def bing_run_report(
+    account_id: str,
+    report_type: str,
+    columns: list[str],
+    start_date: str,
+    end_date: str,
+    aggregation: str = "Daily",
+) -> dict:
+    """Run a flexible Microsoft Advertising report with custom columns and date range.
+
+    Args:
+        account_id: Bing Ads account ID (get from bing_list_accounts).
+        report_type: One of CampaignPerformanceReportRequest,
+            AdGroupPerformanceReportRequest, KeywordPerformanceReportRequest,
+            AccountPerformanceReportRequest, ConversionPerformanceReportRequest.
+        columns: List of column-enum names for that report type, e.g.
+            ["TimePeriod", "CampaignName", "ConversionsQualified", "Revenue"].
+        start_date: Start date in YYYY-MM-DD format.
+        end_date: End date in YYYY-MM-DD format. Must not be after today.
+        aggregation: Daily, Weekly, Monthly, or Summary (default Daily).
+
+    Returns a dict with:
+        - records: list of row dicts (up to 200)
+        - truncated: true if the report had more than 200 rows
+        - total_rows: total row count before truncation
+        - error: Microsoft fault text or validation message (only on failure)
+
+    Use ConversionPerformanceReportRequest with columns Goal, GoalId, GoalType,
+    CampaignName, CampaignId, ConversionsQualified, AllConversionsQualified, Revenue,
+    AllRevenue, Spend, and aggregation Daily or Summary, for a goal breakdown over
+    any date range.
+
+    Goal on a campaign report cannot be combined with ImpressionSharePercent or the
+    other impression-share statistics.
+
+    Conversions and AllConversions are the wrong columns. They return 0. Use the
+    Qualified columns.
+    """
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+
+    def _sync():
+        from jarrah_gads_mcp.bing_ads import fetch_flexible_report
+        return fetch_flexible_report(account_id, report_type, columns, start, end, aggregation)
+
+    return await asyncio.to_thread(_sync)
+
+
 # ---------------------------------------------------------------------------
 # Google OAuth callback — custom routes (bypass MCP auth)
 # ---------------------------------------------------------------------------

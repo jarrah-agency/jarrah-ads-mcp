@@ -385,6 +385,7 @@ def fetch_campaign_metrics(
     cols.CampaignPerformanceReportColumn = [
         "TimePeriod", "CampaignName", "CampaignId",
         "Impressions", "Clicks", "Spend", "AverageCpc", "Ctr",
+        "ConversionsQualified", "AllConversionsQualified", "Revenue", "AllRevenue",
     ]
     rq.Columns = cols
 
@@ -417,6 +418,7 @@ def fetch_keyword_performance(
     cols.KeywordPerformanceReportColumn = [
         "CampaignName", "AdGroupName", "Keyword", "BidMatchType",
         "Impressions", "Clicks", "Spend", "AverageCpc", "Ctr", "QualityScore",
+        "ConversionsQualified", "AllConversionsQualified", "Revenue", "AllRevenue",
     ]
     rq.Columns = cols
 
@@ -426,6 +428,124 @@ def fetch_keyword_performance(
 
     rq.Time = _make_time(svc, start_date, end_date)
     return _submit_and_download(svc, rq)
+
+
+# ---------------------------------------------------------------------------
+# Flexible report builder
+# ---------------------------------------------------------------------------
+
+_VALID_REPORT_TYPES: dict[str, dict[str, str]] = {
+    "CampaignPerformanceReportRequest": {
+        "scope_type": "AccountThroughCampaignReportScope",
+        "col_array_type": "ArrayOfCampaignPerformanceReportColumn",
+        "col_element": "CampaignPerformanceReportColumn",
+    },
+    "AdGroupPerformanceReportRequest": {
+        "scope_type": "AccountThroughAdGroupReportScope",
+        "col_array_type": "ArrayOfAdGroupPerformanceReportColumn",
+        "col_element": "AdGroupPerformanceReportColumn",
+    },
+    "KeywordPerformanceReportRequest": {
+        "scope_type": "AccountThroughAdGroupReportScope",
+        "col_array_type": "ArrayOfKeywordPerformanceReportColumn",
+        "col_element": "KeywordPerformanceReportColumn",
+    },
+    "AccountPerformanceReportRequest": {
+        "scope_type": "AccountReportScope",
+        "col_array_type": "ArrayOfAccountPerformanceReportColumn",
+        "col_element": "AccountPerformanceReportColumn",
+    },
+    "ConversionPerformanceReportRequest": {
+        "scope_type": "AccountThroughAdGroupReportScope",
+        "col_array_type": "ArrayOfConversionPerformanceReportColumn",
+        "col_element": "ConversionPerformanceReportColumn",
+    },
+}
+
+
+def fetch_flexible_report(
+    account_id: str,
+    report_type: str,
+    columns: list[str],
+    start_date: date,
+    end_date: date,
+    aggregation: str = "Daily",
+) -> dict:
+    """Submit an arbitrary Bing Ads report request and return up to 200 rows.
+
+    Returns a dict with keys:
+      - 'records': list of row dicts (max 200)
+      - 'truncated': True if more than 200 rows were returned
+      - 'total_rows': actual row count before truncation
+      or on error:
+      - 'error': Microsoft fault or validation message
+    """
+    if report_type not in _VALID_REPORT_TYPES:
+        return {
+            "error": (
+                f"Unknown report_type '{report_type}'. "
+                f"Allowed: {list(_VALID_REPORT_TYPES)}"
+            )
+        }
+
+    if aggregation not in ("Daily", "Weekly", "Monthly", "Summary"):
+        return {
+            "error": (
+                f"Unknown aggregation '{aggregation}'. "
+                "Allowed: Daily, Weekly, Monthly, Summary"
+            )
+        }
+
+    today = date.today()
+    if end_date > today:
+        return {"error": f"end_date {end_date} is after today ({today})"}
+    if end_date < start_date:
+        return {"error": f"end_date {end_date} is before start_date {start_date}"}
+
+    cols = list(columns)
+    if aggregation == "Summary":
+        if "TimePeriod" in cols:
+            return {"error": "TimePeriod cannot be used with Summary aggregation"}
+    else:
+        if "TimePeriod" not in cols:
+            cols = ["TimePeriod"] + cols
+
+    aid = int(account_id.replace("-", ""))
+    meta = _VALID_REPORT_TYPES[report_type]
+
+    try:
+        svc = _reporting_svc(aid)
+
+        rq = svc.factory.create(report_type)
+        rq.Format = "Csv"
+        rq.ReportName = "FlexibleReport"
+        rq.ReturnOnlyCompleteData = False
+        rq.Aggregation = aggregation
+        rq.ExcludeReportHeader = True
+        rq.ExcludeReportFooter = True
+
+        col_array = svc.factory.create(meta["col_array_type"])
+        setattr(col_array, meta["col_element"], cols)
+        rq.Columns = col_array
+
+        scope = svc.factory.create(meta["scope_type"])
+        scope.AccountIds = _acct_ids(aid)
+        rq.Scope = scope
+
+        rq.Time = _make_time(svc, start_date, end_date)
+
+        df = _submit_and_download(svc, rq)
+    except Exception as exc:
+        return {"error": str(exc)}
+
+    records = df.to_dict(orient="records")
+    total = len(records)
+    truncated = total > 200
+    return {
+        "records": records[:200],
+        "truncated": truncated,
+        "total_rows": total,
+    }
 
 
 def fetch_ad_creative(account_id: str) -> list[dict]:
