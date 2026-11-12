@@ -12,13 +12,26 @@ refresh token stored in env vars (no per-user OAuth). Published to PyPI as `jarr
 Derived from the Parabola AI app (`jarrah-agency/parabola-ai`) — `google_ads.py` and `google_ads_tools.py`
 are taken from that codebase.
 
-## Running locally for development
+## Commands
 
 ```bash
-pip install -r requirements.txt
-cp .env.example .env   # fill in SERVER_URL, GOOGLE_ADS_* credentials, FERNET_KEY
+# Install dependencies (use pyproject.toml — requirements.txt is missing bingads)
+pip install -e .
+
+# Run locally
 SERVER_URL=http://localhost:8000 python3 -m jarrah_gads_mcp.server
+
+# Build PyPI package
+python3 -m build
+
+# Generate a new Fernet key
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+# Regenerate Bing refresh token (safe — does not invalidate the production Fly token)
+python3 get_bing_refresh_token.py
 ```
+
+There is no test suite.
 
 ## Environment variables
 
@@ -28,7 +41,11 @@ SERVER_URL=http://localhost:8000 python3 -m jarrah_gads_mcp.server
 | `GOOGLE_ADS_CLIENT_ID` | Yes | **Web application** OAuth client in Google Cloud Console |
 | `GOOGLE_ADS_CLIENT_SECRET` | Yes | Same Web application OAuth client |
 | `SERVER_URL` | Yes | Deployed base URL, e.g. `https://jarrah-gads-mcp.fly.dev` — no trailing slash |
-| `FERNET_KEY` | Recommended | Base64 Fernet key for encrypting Google refresh tokens in SQLite. Auto-generates one if absent (tokens lost on restart). Generate: `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| `FERNET_KEY` | Recommended | Base64 Fernet key for encrypting Google refresh tokens in SQLite. Auto-generates one if absent (tokens lost on restart). |
+| `BING_DEVELOPER_TOKEN` | Yes (Bing) | Microsoft Advertising developer token |
+| `BING_CLIENT_ID` | Yes (Bing) | Azure AD app client ID |
+| `BING_CLIENT_SECRET` | Yes (Bing) | Azure AD app client secret |
+| `BING_REFRESH_TOKEN` | Yes (Bing) | Shared refresh token (bootstrap value) |
 | `PORT` | No | HTTP port (default 8000) |
 | `DB_PATH` | No | Path to SQLite DB (default: `gads_mcp.db` beside project root) |
 
@@ -47,8 +64,38 @@ jarrah_gads_mcp/
   bing_ads.py      — Bing Ads SOAP client wrapper (shared credentials, no per-user OAuth)
 ```
 
-Root-level `server.py` is the original stdio version kept for reference; `jarrah_gads_mcp/server.py`
-is the authoritative remote version used by the PyPI entry point.
+Root-level `server.py`, `google_ads.py`, and `google_ads_tools.py` are the original stdio-based
+versions kept for reference only. `jarrah_gads_mcp/server.py` is the authoritative remote version
+used by the PyPI entry point. `AGENTS.md` is a stale duplicate of this file (pre-Bing Ads).
+
+### Tool development pattern
+
+Every MCP tool follows the same two-layer pattern:
+
+1. **Sync function** in `google_ads.py` or `bing_ads.py` — does the actual API work, returns a
+   DataFrame or dict/list.
+2. **Async wrapper** in `server.py` decorated with `@mcp.tool()` — parses string args, calls the
+   sync function via `asyncio.to_thread(_sync)`, and returns JSON-serialisable output.
+
+```python
+# bing_ads.py
+def fetch_something(account_id: str, start_date: date, end_date: date) -> pd.DataFrame:
+    ...
+
+# server.py
+@mcp.tool()
+async def bing_something(account_id: str, start_date: str, end_date: str) -> list[dict]:
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+    def _sync():
+        from jarrah_gads_mcp.bing_ads import fetch_something
+        return fetch_something(account_id, start, end).to_dict(orient="records")
+    return await asyncio.to_thread(_sync)
+```
+
+Tools that change session state (e.g. `switch_account`) must write to the `_account_overrides`
+dict in `server.py` directly — DB updates alone are invisible to the already-loaded token in the
+session contextvar.
 
 ### OAuth flow
 
@@ -74,18 +121,16 @@ MCP tool call → bearer token verified via load_access_token()
 - `GadsAuthCode(AuthorizationCode)` — extends with `google_rt_enc`, `customer_id`, `login_customer_id`
 - `GadsRefreshToken(RefreshToken)` — extends with `google_rt_enc`, `customer_id`, `login_customer_id`
 
-Note from provider.py: "FastMCP doesn't render any of these types in the user response, so it's OK to
-add fields to subclasses which should not be exposed externally."
+FastMCP doesn't render these types in the user response, so it's safe to add fields to subclasses.
 
 ### Access token context in tools
 
-Tools retrieve per-user credentials via:
 ```python
 from mcp.server.auth.middleware.auth_context import get_access_token
 token = get_access_token()  # returns GadsAccessToken for authenticated requests
 ```
 
-This works because `AuthContextMiddleware` stores the authenticated user in a contextvar.
+`AuthContextMiddleware` stores the authenticated user in a contextvar.
 
 ### MCP endpoint path
 
@@ -133,6 +178,8 @@ middleware that rewrites `scope["path"]` from `/` to `/mcp` before the request r
 - **Report requests**: `CustomDateRangeStart/End` use the `Date` SOAP type (not named types). `AccountIds` is passed as `{"long": [account_id]}` (not `svc.factory.create("ArrayOflong")`). Keyword reports use `BidMatchType` not `MatchType`. `Language` and `MaxOrMinBidOption` fields are omitted.
 - Reporting tools submit a report, poll up to 120 seconds, download the zip, parse the CSV. `ExcludeReportHeader=True` / `ExcludeReportFooter=True` produce clean CSVs; `_parse_report_csv` drops the trailing Total row.
 - `bing_list_accounts` returns account `id` values required by the other Bing tools.
+- **Conversion columns**: `Conversions` and `AllConversions` are deprecated and return 0. Use `ConversionsQualified` and `AllConversionsQualified`. Revenue columns are `Revenue` and `AllRevenue`. Do not add `Goal`/`GoalType` to `CampaignPerformanceReportRequest` — they conflict with impression-share columns. Use `ConversionPerformanceReportRequest` via `bing_run_report` for goal breakdowns.
+- **`bing_run_report` scope types**: `CampaignPerformanceReportRequest` → `AccountThroughCampaignReportScope`; keyword/ad group/conversion reports → `AccountThroughAdGroupReportScope`; account reports → `AccountReportScope`.
 - To regenerate the refresh token: `python3 get_bing_refresh_token.py` (uses authorization_code flow, safe to run without invalidating Fly's token).
 
 ### Keyword Planner notes
@@ -201,3 +248,4 @@ Note: Fly.io deploys install from local source via Docker (`pip install .`), so 
   not per tool call. Any code that needs to change credentials mid-session (e.g. `switch_account`)
   must write to the `_account_overrides` dict in `server.py` — DB updates alone are invisible to the
   running session.
+- `requirements.txt` does not include `bingads` — use `pip install -e .` (from `pyproject.toml`) for a complete install.
