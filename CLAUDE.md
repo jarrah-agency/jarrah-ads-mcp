@@ -5,9 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A remote HTTP MCP server exposing Google Ads and Microsoft Advertising (Bing Ads) tools. Users
-authenticate with their own Google accounts via OAuth 2.0, select a Google Ads account, and the
-server issues MCP bearer tokens that carry their credentials. Bing Ads tools use a single shared
-refresh token stored in env vars (no per-user OAuth). Published to PyPI as `jarrah-gads-mcp`.
+authenticate with their own Google and Microsoft accounts via OAuth 2.0, and the server issues MCP
+bearer tokens that carry both sets of credentials encrypted. Published to PyPI as `jarrah-gads-mcp`.
 
 Derived from the Parabola AI app (`jarrah-agency/parabola-ai`) — `google_ads.py` and `google_ads_tools.py`
 are taken from that codebase.
@@ -45,7 +44,7 @@ There is no test suite.
 | `BING_DEVELOPER_TOKEN` | Yes (Bing) | Microsoft Advertising developer token |
 | `BING_CLIENT_ID` | Yes (Bing) | Azure AD app client ID |
 | `BING_CLIENT_SECRET` | Yes (Bing) | Azure AD app client secret |
-| `BING_REFRESH_TOKEN` | Yes (Bing) | Shared refresh token (bootstrap value) |
+| `BING_REFRESH_TOKEN` | Yes (Bing) | Fallback refresh token for sessions created before per-user OAuth, and for self-hosters who skip the Microsoft login step |
 | `PORT` | No | HTTP port (default 8000) |
 | `DB_PATH` | No | Path to SQLite DB (default: `gads_mcp.db` beside project root) |
 
@@ -61,7 +60,7 @@ jarrah_gads_mcp/
   server.py        — FastMCP server with auth, tools, and custom routes
   google_ads.py    — GoogleAdsClient wrapper + fetch_* functions returning DataFrames
   google_ads_tools.py — run_gaql() async wrapper with JSON output
-  bing_ads.py      — Bing Ads SOAP client wrapper (shared credentials, no per-user OAuth)
+  bing_ads.py      — Bing Ads SOAP client wrapper (per-user OAuth; falls back to env token)
 ```
 
 Root-level `server.py`, `google_ads.py`, and `google_ads_tools.py` are the original stdio-based
@@ -78,18 +77,20 @@ Every MCP tool follows the same two-layer pattern:
    sync function via `asyncio.to_thread(_sync)`, and returns JSON-serialisable output.
 
 ```python
-# bing_ads.py
-def fetch_something(account_id: str, start_date: date, end_date: date) -> pd.DataFrame:
+# bing_ads.py — always accept bing_refresh_token=None as last parameter
+def fetch_something(account_id: str, start_date: date, end_date: date,
+                    bing_refresh_token: str | None = None) -> pd.DataFrame:
     ...
 
-# server.py
+# server.py — call _bing_rt() and pass it through
 @mcp.tool()
 async def bing_something(account_id: str, start_date: str, end_date: str) -> list[dict]:
     start = date.fromisoformat(start_date)
     end = date.fromisoformat(end_date)
+    bing_refresh_token = _bing_rt()
     def _sync():
         from jarrah_gads_mcp.bing_ads import fetch_something
-        return fetch_something(account_id, start, end).to_dict(orient="records")
+        return fetch_something(account_id, start, end, bing_refresh_token).to_dict(orient="records")
     return await asyncio.to_thread(_sync)
 ```
 
@@ -106,20 +107,25 @@ Google → GET /oauth/google/callback
   → exchanges Google code for Google refresh token
   → lists accessible Google Ads accounts
   → single account: auto-selects; multiple: shows HTML account picker
+  → stores account selection + bing_state in pending row
+  → redirects to Microsoft OAuth
+Microsoft → GET /oauth/microsoft/callback
+  → exchanges Microsoft code for Bing refresh token
   → creates MCP auth code → redirects back to MCP client redirect_uri
+  (user may skip via GET /oauth/microsoft/skip → MCP code with no Bing token)
 MCP client → POST /token
   → exchange_authorization_code() mints MCP access+refresh tokens
-  → tokens carry (encrypted Google refresh token, customer_id, login_customer_id)
+  → tokens carry (encrypted Google RT, customer_id, login_customer_id, encrypted Bing RT)
 MCP tool call → bearer token verified via load_access_token()
-  → GadsAccessToken contains decrypted google_refresh_token
-  → tools call _creds() → get_access_token() to retrieve credentials
+  → GadsAccessToken contains decrypted google_refresh_token + bing_refresh_token
+  → Google tools call _creds(); Bing tools call _bing_rt()
 ```
 
 ### Key types
 
-- `GadsAccessToken(AccessToken)` — extends with `google_refresh_token`, `customer_id`, `login_customer_id`
-- `GadsAuthCode(AuthorizationCode)` — extends with `google_rt_enc`, `customer_id`, `login_customer_id`
-- `GadsRefreshToken(RefreshToken)` — extends with `google_rt_enc`, `customer_id`, `login_customer_id`
+- `GadsAccessToken(AccessToken)` — extends with `google_refresh_token`, `customer_id`, `login_customer_id`, `bing_refresh_token`
+- `GadsAuthCode(AuthorizationCode)` — extends with `google_rt_enc`, `customer_id`, `login_customer_id`, `bing_rt_enc`
+- `GadsRefreshToken(RefreshToken)` — extends with `google_rt_enc`, `customer_id`, `login_customer_id`, `bing_rt_enc`
 
 FastMCP doesn't render these types in the user response, so it's safe to add fields to subclasses.
 
@@ -146,6 +152,8 @@ middleware that rewrites `scope["path"]` from `/` to `/mcp` before the request r
 `@mcp.custom_route()` adds routes that bypass MCP auth middleware:
 - `GET /oauth/google/callback` — receives Google OAuth callback
 - `POST /oauth/select-account` — handles account picker form
+- `GET /oauth/microsoft/callback` — receives Microsoft OAuth callback; exchanges code for Bing refresh token
+- `GET /oauth/microsoft/skip` — completes the flow without a Bing token (Bing tools fall back to env)
 - `GET /health` — health check
 
 ### Tools
@@ -160,7 +168,7 @@ middleware that rewrites `scope["path"]` from `/` to `/mcp` before the request r
 | `get_conversion_actions` | Enabled conversions with 90-day volume |
 | `get_quality_scores` | Keyword QS (1–10) with ad relevance, landing page, expected CTR |
 | `get_ad_creative` | RSA headlines, descriptions, final URLs for all active ads |
-| `bing_list_accounts` | List all Microsoft Advertising accounts accessible with the shared credentials |
+| `bing_list_accounts` | List all Microsoft Advertising accounts accessible to the authenticated user |
 | `bing_get_campaign_metrics` | Bing campaign daily spend, impressions, clicks, CTR, avg CPC, conversions, and revenue |
 | `bing_get_keyword_performance` | Bing keyword clicks, spend, avg CPC, CTR, quality score, conversions, and revenue |
 | `bing_get_ad_creative` | Bing RSA headlines/descriptions and ETA title/text |
@@ -168,8 +176,9 @@ middleware that rewrites `scope["path"]` from `/` to `/mcp` before the request r
 
 ### Bing Ads notes
 
-- Uses the `bingads` Python SDK (SOAP). Auth uses a single shared refresh token from `BING_REFRESH_TOKEN` env var — no per-user OAuth.
+- Uses the `bingads` Python SDK (SOAP). Each user authenticates via Microsoft OAuth during the MCP connect flow; the per-user Bing refresh token is stored encrypted in SQLite alongside the Google token. Sessions that pre-date per-user OAuth, or users who skip the Microsoft step, fall back to `BING_REFRESH_TOKEN`.
 - Required env vars: `BING_DEVELOPER_TOKEN`, `BING_CLIENT_ID`, `BING_CLIENT_SECRET`, `BING_REFRESH_TOKEN`. All four must be set — a missing `BING_DEVELOPER_TOKEN` causes "Invalid client data" errors even if OAuth succeeds.
+- The Azure AD app must have `{SERVER_URL}/oauth/microsoft/callback` as an authorised redirect URI.
 - **Token rotation**: Microsoft rotates the refresh token on each use. `_exchange_refresh_token()` in `bing_ads.py` fetches the access token directly via `urllib` (bypassing the SDK's OAuth flow to control the exact scope). Rotated tokens are persisted in the SQLite `kv` table (keys `bing_refresh_token` / `bing_refresh_token_source`) so they survive process restarts. The `kv` table is keyed to a SHA-256 fingerprint of the env token, so a new Fly secret starts a fresh chain. **Do not run local token-exchange tests against the production `BING_REFRESH_TOKEN` — each use invalidates the previous token and can break the entire token family.**
 - **Account lookup**: `list_accounts` uses `CustomerManagementService.SearchAccounts` with a user-ID predicate (not `GetAccountsInfo`). Customer IDs are cached in `_customers_by_account` and injected into reporting/management service calls.
 - **SDK SOAP header patch**: `_patch_service_headers()` overrides the SDK's header builder to omit `CustomerId`/`CustomerAccountId` fields when they are `None` — the SDK otherwise serialises them as the string `"None"` which Microsoft rejects.
@@ -202,6 +211,7 @@ To set up from scratch:
 2. `fly volumes create gads_mcp_data --region syd --size 1`
 3. `fly secrets set GOOGLE_ADS_DEVELOPER_TOKEN=... GOOGLE_ADS_CLIENT_ID=... GOOGLE_ADS_CLIENT_SECRET=... SERVER_URL=https://<app>.fly.dev FERNET_KEY=... DB_PATH=/data/gads_mcp.db`
 4. In Google Cloud Console: add `https://<app>.fly.dev/oauth/google/callback` as an authorized redirect URI on the **Web application** OAuth client.
+5. In Azure portal: add `https://<app>.fly.dev/oauth/microsoft/callback` as a redirect URI on the Azure AD app.
 
 ## PyPI package
 
