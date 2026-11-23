@@ -14,7 +14,7 @@ https://jarrah-gads-mcp.fly.dev
 
 The MCP endpoint is `/mcp`. Clients that POST to the site root are forwarded there.
 
-On first use the client opens Google sign-in. One accessible Ads account is selected automatically. Several accounts show a picker. `switch_account` changes the account for the rest of the session, including accounts under an MCC.
+On first use the client opens Google sign-in, then Microsoft sign-in for Bing Ads access. One accessible Google Ads account is selected automatically; several accounts show a picker. Users who skip the Microsoft step can still use all Google Ads tools. `switch_account` changes the Google Ads account for the rest of the session, including accounts under an MCC.
 
 ## Tools
 
@@ -28,7 +28,7 @@ On first use the client opens Google sign-in. One accessible Ads account is sele
 | `get_conversion_actions` | Enabled conversions with 90-day volume |
 | `get_quality_scores` | Keyword quality score (1–10) with ad relevance, landing page, and expected CTR |
 | `get_ad_creative` | RSA headlines, descriptions, and final URLs for active ads |
-| `bing_list_accounts` | List Microsoft Advertising accounts accessible with the configured credentials |
+| `bing_list_accounts` | List Microsoft Advertising accounts accessible to the signed-in Microsoft account |
 | `bing_get_campaign_metrics` | Bing campaign daily spend, impressions, clicks, CTR, avg CPC, conversions, and revenue |
 | `bing_get_keyword_performance` | Bing keyword clicks, spend, avg CPC, CTR, quality score, conversions, and revenue |
 | `bing_get_ad_creative` | Bing RSA headlines/descriptions and ETA title/text |
@@ -40,9 +40,9 @@ On first use the client opens Google sign-in. One accessible Ads account is sele
 - Include a date filter. The Google Ads API rejects most queries without one, for example `segments.date DURING LAST_30_DAYS`.
 - Customer ID dashes are stripped before the API call.
 
-## Bing Ads note
+## Bing Ads
 
-The hosted server connects Bing Ads tools to a single configured Microsoft Advertising account. If you need Bing tools pointed at your own account, run your own server and supply your own `BING_*` credentials.
+Bing Ads tools use per-user Microsoft OAuth. During the connect flow, after Google sign-in you are redirected to Microsoft to authorise access to your own Microsoft Advertising account. The Bing token is stored encrypted alongside your Google token and used for all subsequent Bing tool calls.
 
 ## Run your own server
 
@@ -60,13 +60,17 @@ SERVER_URL=http://localhost:8000 python3 -m jarrah_gads_mcp.server
 | `GOOGLE_ADS_CLIENT_ID` | Yes | **Web application** OAuth client in Google Cloud Console |
 | `GOOGLE_ADS_CLIENT_SECRET` | Yes | Same OAuth client |
 | `SERVER_URL` | Yes | Public base URL, no trailing slash, e.g. `https://your-app.fly.dev` |
-| `FERNET_KEY` | Recommended | Encrypts Google refresh tokens in SQLite. Without it, a new key is generated on startup and stored tokens are lost on restart |
+| `FERNET_KEY` | Recommended | Encrypts refresh tokens in SQLite. Without it, a new key is generated on startup and stored tokens are lost on restart |
+| `BING_DEVELOPER_TOKEN` | Yes (Bing) | Microsoft Advertising developer token |
+| `BING_CLIENT_ID` | Yes (Bing) | Azure AD app client ID |
+| `BING_CLIENT_SECRET` | Yes (Bing) | Azure AD app client secret |
+| `BING_REFRESH_TOKEN` | No | Fallback for sessions that skip the Microsoft sign-in step |
 | `PORT` | No | HTTP port (default `8000`) |
 | `DB_PATH` | No | SQLite path (default `gads_mcp.db`) |
 
-Google refresh tokens and customer IDs are collected per user during OAuth. They are not server environment variables.
+Google and Microsoft refresh tokens are collected per user during OAuth. They are not server environment variables.
 
-In Google Cloud Console, add `{SERVER_URL}/oauth/google/callback` as an authorized redirect URI on that web OAuth client.
+In Google Cloud Console, add `{SERVER_URL}/oauth/google/callback` as an authorized redirect URI on the web OAuth client. In the Azure portal, add `{SERVER_URL}/oauth/microsoft/callback` as a redirect URI on the Azure AD app.
 
 A production deploy needs a persistent disk for the SQLite database (`DB_PATH=/data/gads_mcp.db`) and at least 512 MB of RAM. The running server for this repo is on Fly.io in `syd`: [jarrah-gads-mcp.fly.dev](https://jarrah-gads-mcp.fly.dev).
 
