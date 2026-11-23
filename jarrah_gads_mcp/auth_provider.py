@@ -71,18 +71,21 @@ class GadsAuthCode(AuthorizationCode):
     google_rt_enc: str   # encrypted google refresh token
     customer_id: str
     login_customer_id: str | None = None
+    bing_rt_enc: str | None = None  # encrypted microsoft refresh token (optional)
 
 
 class GadsAccessToken(AccessToken):
     google_refresh_token: str  # decrypted, ready for API calls
     customer_id: str
     login_customer_id: str | None = None
+    bing_refresh_token: str | None = None  # decrypted microsoft refresh token (optional)
 
 
 class GadsRefreshToken(RefreshToken):
     google_rt_enc: str
     customer_id: str
     login_customer_id: str | None = None
+    bing_rt_enc: str | None = None  # encrypted microsoft refresh token (optional)
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +179,7 @@ class GoogleAdsOAuthProvider:
             google_rt_enc=row["google_rt_enc"],
             customer_id=row["customer_id"],
             login_customer_id=row["login_customer_id"],
+            bing_rt_enc=row.get("bing_rt_enc"),
         )
 
     async def exchange_authorization_code(
@@ -199,6 +203,7 @@ class GoogleAdsOAuthProvider:
             authorization_code.customer_id,
             authorization_code.login_customer_id,
             expires_at,
+            authorization_code.bing_rt_enc,
         )
         await asyncio.to_thread(
             _db.save_refresh_token,
@@ -209,6 +214,7 @@ class GoogleAdsOAuthProvider:
             authorization_code.customer_id,
             authorization_code.login_customer_id,
             None,  # refresh tokens don't expire in our scheme
+            authorization_code.bing_rt_enc,
         )
 
         return OAuthToken(
@@ -235,6 +241,7 @@ class GoogleAdsOAuthProvider:
             google_refresh_token=decrypt(row["google_rt_enc"]),
             customer_id=row["customer_id"],
             login_customer_id=row["login_customer_id"],
+            bing_refresh_token=decrypt(row["bing_rt_enc"]) if row.get("bing_rt_enc") else None,
         )
 
     # ------------------------------------------------------------------
@@ -257,6 +264,7 @@ class GoogleAdsOAuthProvider:
             google_rt_enc=row["google_rt_enc"],
             customer_id=row["customer_id"],
             login_customer_id=row["login_customer_id"],
+            bing_rt_enc=row.get("bing_rt_enc"),
         )
 
     async def exchange_refresh_token(
@@ -283,6 +291,7 @@ class GoogleAdsOAuthProvider:
             refresh_token.customer_id,
             refresh_token.login_customer_id,
             expires_at,
+            refresh_token.bing_rt_enc,
         )
         await asyncio.to_thread(
             _db.save_refresh_token,
@@ -293,6 +302,7 @@ class GoogleAdsOAuthProvider:
             refresh_token.customer_id,
             refresh_token.login_customer_id,
             None,
+            refresh_token.bing_rt_enc,
         )
 
         return OAuthToken(

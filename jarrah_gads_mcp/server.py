@@ -100,6 +100,14 @@ def _creds() -> tuple[str, str, str | None]:
     return token.google_refresh_token, token.customer_id, token.login_customer_id
 
 
+def _bing_rt() -> str | None:
+    """Return per-user Bing refresh token if available; None falls back to env token in bing_ads.py."""
+    token = get_access_token()
+    if isinstance(token, GadsAccessToken):
+        return token.bing_refresh_token  # may be None for sessions created before Bing OAuth
+    return None
+
+
 # ---------------------------------------------------------------------------
 # MCP Tools
 # ---------------------------------------------------------------------------
@@ -329,9 +337,11 @@ async def bing_list_accounts() -> list[dict]:
     Returns a list of {id, name, number, customer_id, status} dicts.
     Use the 'id' value as the account_id parameter for other bing_* tools.
     """
+    bing_refresh_token = _bing_rt()
+
     def _sync():
         from jarrah_gads_mcp.bing_ads import list_accounts
-        return list_accounts()
+        return list_accounts(bing_refresh_token)
 
     return await asyncio.to_thread(_sync)
 
@@ -353,10 +363,11 @@ async def bing_get_campaign_metrics(
     """
     start = date.fromisoformat(start_date)
     end = date.fromisoformat(end_date)
+    bing_refresh_token = _bing_rt()
 
     def _sync():
         from jarrah_gads_mcp.bing_ads import fetch_campaign_metrics
-        df = fetch_campaign_metrics(account_id, start, end)
+        df = fetch_campaign_metrics(account_id, start, end, bing_refresh_token)
         return df.to_dict(orient="records")
 
     return await asyncio.to_thread(_sync)
@@ -379,10 +390,11 @@ async def bing_get_keyword_performance(
     """
     start = date.fromisoformat(start_date)
     end = date.fromisoformat(end_date)
+    bing_refresh_token = _bing_rt()
 
     def _sync():
         from jarrah_gads_mcp.bing_ads import fetch_keyword_performance
-        df = fetch_keyword_performance(account_id, start, end)
+        df = fetch_keyword_performance(account_id, start, end, bing_refresh_token)
         return df.to_dict(orient="records")
 
     return await asyncio.to_thread(_sync)
@@ -398,9 +410,11 @@ async def bing_get_ad_creative(account_id: str) -> list[dict]:
     Returns headlines, descriptions, and final URLs for responsive search ads
     and title/text for expanded text ads.
     """
+    bing_refresh_token = _bing_rt()
+
     def _sync():
         from jarrah_gads_mcp.bing_ads import fetch_ad_creative
-        return fetch_ad_creative(account_id)
+        return fetch_ad_creative(account_id, bing_refresh_token)
 
     return await asyncio.to_thread(_sync)
 
@@ -446,10 +460,11 @@ async def bing_run_report(
     """
     start = date.fromisoformat(start_date)
     end = date.fromisoformat(end_date)
+    bing_refresh_token = _bing_rt()
 
     def _sync():
         from jarrah_gads_mcp.bing_ads import fetch_flexible_report
-        return fetch_flexible_report(account_id, report_type, columns, start, end, aggregation)
+        return fetch_flexible_report(account_id, report_type, columns, start, end, aggregation, bing_refresh_token)
 
     return await asyncio.to_thread(_sync)
 
@@ -583,6 +598,79 @@ async def select_account(request: Request) -> Response:
 
 
 # ---------------------------------------------------------------------------
+# Microsoft OAuth callback routes
+# NOTE: Add {SERVER_URL}/oauth/microsoft/callback to the Azure AD app's redirect URIs
+# ---------------------------------------------------------------------------
+
+@mcp.custom_route("/oauth/microsoft/callback", methods=["GET"])
+async def microsoft_callback(request: Request) -> Response:
+    """Receive Microsoft OAuth callback, exchange code for Bing refresh token."""
+    bing_state = request.query_params.get("state", "")
+    ms_code = request.query_params.get("code")
+    error = request.query_params.get("error")
+
+    if not bing_state:
+        return HTMLResponse("<h2>Bad request</h2>", status_code=400)
+
+    if error:
+        from urllib.parse import quote
+        return HTMLResponse(
+            f"<h2>Microsoft authorization failed</h2><p>{error}</p>"
+            f"<p><a href='/oauth/microsoft/skip?state={quote(bing_state)}'>Continue with Google Ads only</a></p>",
+            status_code=400,
+        )
+
+    if not ms_code:
+        return HTMLResponse("<h2>Bad request</h2>", status_code=400)
+
+    pending = await asyncio.to_thread(_db.get_pending_by_bing_state, bing_state)
+    if pending is None or pending["expires_at"] < int(time.time()):
+        return HTMLResponse("<h2>Authorization expired or not found</h2>", status_code=400)
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+            data={
+                "code": ms_code,
+                "client_id": os.environ["BING_CLIENT_ID"],
+                "client_secret": os.environ["BING_CLIENT_SECRET"],
+                "redirect_uri": f"{SERVER_URL}/oauth/microsoft/callback",
+                "grant_type": "authorization_code",
+                "scope": "https://ads.microsoft.com/msads.manage offline_access",
+            },
+        )
+
+    if resp.status_code != 200:
+        log.error("Microsoft token exchange failed: %s", resp.text)
+        return HTMLResponse("<h2>Microsoft token exchange failed</h2>", status_code=500)
+
+    token_data = resp.json()
+    bing_refresh_token = token_data.get("refresh_token")
+    if not bing_refresh_token:
+        return HTMLResponse(
+            "<h2>Microsoft did not return a refresh token.</h2>",
+            status_code=400,
+        )
+
+    bing_rt_enc = encrypt(bing_refresh_token)
+    return await _create_mcp_code(pending, bing_rt_enc)
+
+
+@mcp.custom_route("/oauth/microsoft/skip", methods=["GET"])
+async def microsoft_skip(request: Request) -> Response:
+    """Skip Microsoft OAuth and continue with Google Ads only (no Bing token)."""
+    bing_state = request.query_params.get("state", "")
+    if not bing_state:
+        return HTMLResponse("<h2>Bad request</h2>", status_code=400)
+
+    pending = await asyncio.to_thread(_db.get_pending_by_bing_state, bing_state)
+    if pending is None or pending["expires_at"] < int(time.time()):
+        return HTMLResponse("<h2>Authorization expired or not found</h2>", status_code=400)
+
+    return await _create_mcp_code(pending, None)
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
@@ -593,7 +681,7 @@ async def _finalize_account(
     accounts: list[dict],
     selected_id: str,
 ) -> Response:
-    """Create MCP auth code and redirect back to the MCP client."""
+    """Store account selection in pending row and redirect to Microsoft OAuth."""
     # Determine login_customer_id (for MCC access)
     managers = [a for a in accounts if a.get("is_manager")]
     selected = next((a for a in accounts if a["id"] == selected_id), None)
@@ -601,6 +689,30 @@ async def _finalize_account(
     if selected and not selected.get("is_manager") and len(managers) == 1:
         login_customer_id = managers[0]["id"]
 
+    bing_state = secrets.token_urlsafe(32)
+    await asyncio.to_thread(
+        _db.update_pending_bing_state,
+        google_state,
+        bing_state,
+        selected_id,
+        login_customer_id,
+    )
+
+    ms_params = urlencode({
+        "client_id": os.environ["BING_CLIENT_ID"],
+        "response_type": "code",
+        "redirect_uri": f"{SERVER_URL}/oauth/microsoft/callback",
+        "scope": "https://ads.microsoft.com/msads.manage offline_access",
+        "state": bing_state,
+    })
+    return RedirectResponse(
+        f"https://login.microsoftonline.com/common/oauth2/v2.0/authorize?{ms_params}",
+        status_code=302,
+    )
+
+
+async def _create_mcp_code(pending: dict, bing_rt_enc: str | None) -> Response:
+    """Create MCP auth code and redirect back to the MCP client."""
     mcp_code = secrets.token_urlsafe(32)
     expires_at = int(time.time()) + 300  # 5-minute code lifetime
 
@@ -612,14 +724,15 @@ async def _finalize_account(
         True,  # redirect_uri_provided_explicitly
         pending["code_challenge"],
         pending["scopes"],
-        google_rt_enc,
-        selected_id,
-        login_customer_id,
+        pending["google_rt_enc"],
+        pending["customer_id"],
+        pending["login_customer_id"],
         None,  # resource
         expires_at,
+        bing_rt_enc,
     )
 
-    await asyncio.to_thread(_db.delete_pending, google_state)
+    await asyncio.to_thread(_db.delete_pending, pending["google_state"])
 
     # Build redirect back to MCP client
     redirect_uri = pending["redirect_uri"]

@@ -74,23 +74,29 @@ def _persist_refresh_token(new_rt: str) -> None:
         log.warning("Failed to persist rotated Bing refresh token", exc_info=True)
 
 
-def _exchange_refresh_token() -> str:
-    """Exchange the stored refresh token for an access token using urllib directly.
+def _exchange_refresh_token(bing_refresh_token: str | None = None) -> str:
+    """Exchange a refresh token for an access token using urllib directly.
 
     Bypasses the bingads SDK's internal OAuth flow so we control the exact
-    scope string and avoid any SDK version quirks.  If Microsoft rotates the
-    refresh token, the new value is kept in memory and written to SQLite.
+    scope string and avoid any SDK version quirks.
+
+    When bing_refresh_token is provided (per-user token), it is used directly
+    and rotated tokens are NOT persisted (the caller holds the token lifecycle).
+    When bing_refresh_token is None, the shared env/persisted token is used and
+    any rotation is written to SQLite.
     """
     import json
     import urllib.error
     import urllib.parse
     import urllib.request
 
+    rt = bing_refresh_token if bing_refresh_token else _ensure_refresh_token()
+
     data = urllib.parse.urlencode({
         "grant_type": "refresh_token",
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
-        "refresh_token": _ensure_refresh_token(),
+        "refresh_token": rt,
         "scope": "https://ads.microsoft.com/msads.manage offline_access",
     }).encode()
 
@@ -111,8 +117,9 @@ def _exchange_refresh_token() -> str:
         raise RuntimeError(f"Bing Ads token exchange returned no access_token: {tokens}")
 
     new_rt = tokens.get("refresh_token")
-    if new_rt and new_rt != _refresh_token["value"]:
-        log.info("Bing Ads refresh token rotated")
+    # Only persist rotation for the shared env token, not per-user tokens
+    if new_rt and bing_refresh_token is None and new_rt != _refresh_token["value"]:
+        log.info("Bing Ads shared refresh token rotated")
         _refresh_token["value"] = new_rt
         _persist_refresh_token(new_rt)
 
@@ -158,19 +165,28 @@ def _developer_token() -> str:
     return token
 
 
-def _auth(account_id: int | None = None, customer_id: int | None = None):
+def _auth(
+    account_id: int | None = None,
+    customer_id: int | None = None,
+    bing_refresh_token: str | None = None,
+):
     """Build an AuthorizationData object with a pre-fetched access token.
 
     Fetches the access token ourselves (bypassing bingads SDK OAuth) so the
     scope and token format are guaranteed to match what Microsoft expects.
+
+    When bing_refresh_token is provided, it is used directly (per-user OAuth).
+    Otherwise the shared env token is used as a fallback.
     """
     from bingads import AuthorizationData, OAuthWebAuthCodeGrant
     from bingads.authorization import OAuthTokens
 
     _patch_service_headers()
-    access_token = _exchange_refresh_token()
+    access_token = _exchange_refresh_token(bing_refresh_token)
 
     # oauth_tokens is a read-only property; pass the tokens to the constructor.
+    # Use the per-user token if provided, otherwise fall back to the shared env token.
+    rt_for_sdk = bing_refresh_token or _refresh_token["value"]
     oauth = OAuthWebAuthCodeGrant(
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
@@ -178,7 +194,7 @@ def _auth(account_id: int | None = None, customer_id: int | None = None):
         oauth_tokens=OAuthTokens(
             access_token=access_token,
             access_token_expires_in_seconds=3600,
-            refresh_token=_refresh_token["value"],
+            refresh_token=rt_for_sdk,
         ),
         env="production",
     )
@@ -199,14 +215,14 @@ def _as_list(value):
     return [value]
 
 
-def list_accounts() -> list[dict]:
+def list_accounts(bing_refresh_token: str | None = None) -> list[dict]:
     """Return {id, name, number, customer_id, status} for all accessible accounts."""
     from bingads import ServiceClient
 
     svc = ServiceClient(
         "CustomerManagementService",
         version=13,
-        authorization_data=_auth(),
+        authorization_data=_auth(bing_refresh_token=bing_refresh_token),
         environment="production",
     )
     user = svc.GetUser(UserId=None).User
@@ -247,10 +263,10 @@ def list_accounts() -> list[dict]:
 _customers_by_account: dict[str, int] = {}
 
 
-def _customer_id_for(account_id: int) -> int:
+def _customer_id_for(account_id: int, bing_refresh_token: str | None = None) -> int:
     key = str(account_id)
     if key not in _customers_by_account:
-        list_accounts()
+        list_accounts(bing_refresh_token)
     if key not in _customers_by_account:
         raise RuntimeError(
             f"Bing Ads account {account_id} is not accessible to the signed-in Microsoft user"
@@ -262,14 +278,15 @@ def _customer_id_for(account_id: int) -> int:
 # Reporting helpers
 # ---------------------------------------------------------------------------
 
-def _reporting_svc(account_id: int):
+def _reporting_svc(account_id: int, bing_refresh_token: str | None = None):
     from bingads import ServiceClient
     return ServiceClient(
         "ReportingService",
         version=13,
         authorization_data=_auth(
             account_id=account_id,
-            customer_id=_customer_id_for(account_id),
+            customer_id=_customer_id_for(account_id, bing_refresh_token),
+            bing_refresh_token=bing_refresh_token,
         ),
         environment="production",
     )
@@ -368,10 +385,11 @@ def fetch_campaign_metrics(
     account_id: str,
     start_date: date,
     end_date: date,
+    bing_refresh_token: str | None = None,
 ) -> pd.DataFrame:
     """Campaign performance: daily spend, impressions, clicks, CTR, avg CPC."""
     aid = int(account_id.replace("-", ""))
-    svc = _reporting_svc(aid)
+    svc = _reporting_svc(aid, bing_refresh_token)
 
     rq = svc.factory.create("CampaignPerformanceReportRequest")
     rq.Format = "Csv"
@@ -401,10 +419,11 @@ def fetch_keyword_performance(
     account_id: str,
     start_date: date,
     end_date: date,
+    bing_refresh_token: str | None = None,
 ) -> pd.DataFrame:
     """Keyword performance: clicks, spend, avg CPC, CTR, quality score."""
     aid = int(account_id.replace("-", ""))
-    svc = _reporting_svc(aid)
+    svc = _reporting_svc(aid, bing_refresh_token)
 
     rq = svc.factory.create("KeywordPerformanceReportRequest")
     rq.Format = "Csv"
@@ -470,6 +489,7 @@ def fetch_flexible_report(
     start_date: date,
     end_date: date,
     aggregation: str = "Daily",
+    bing_refresh_token: str | None = None,
 ) -> dict:
     """Submit an arbitrary Bing Ads report request and return up to 200 rows.
 
@@ -514,7 +534,7 @@ def fetch_flexible_report(
     meta = _VALID_REPORT_TYPES[report_type]
 
     try:
-        svc = _reporting_svc(aid)
+        svc = _reporting_svc(aid, bing_refresh_token)
 
         rq = svc.factory.create(report_type)
         rq.Format = "Csv"
@@ -548,7 +568,7 @@ def fetch_flexible_report(
     }
 
 
-def fetch_ad_creative(account_id: str) -> list[dict]:
+def fetch_ad_creative(account_id: str, bing_refresh_token: str | None = None) -> list[dict]:
     """Fetch RSA and ETA creative via Campaign Management service."""
     from bingads import ServiceClient
 
@@ -558,7 +578,8 @@ def fetch_ad_creative(account_id: str) -> list[dict]:
         version=13,
         authorization_data=_auth(
             account_id=aid,
-            customer_id=_customer_id_for(aid),
+            customer_id=_customer_id_for(aid, bing_refresh_token),
+            bing_refresh_token=bing_refresh_token,
         ),
         environment="production",
     )

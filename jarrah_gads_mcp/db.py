@@ -54,7 +54,10 @@ def init_db() -> None:
                 code_challenge  TEXT NOT NULL,
                 scopes          TEXT NOT NULL,
                 google_rt_enc   TEXT,
-                expires_at      INTEGER NOT NULL
+                expires_at      INTEGER NOT NULL,
+                bing_state      TEXT,
+                customer_id     TEXT,
+                login_customer_id TEXT
             );
 
             CREATE TABLE IF NOT EXISTS oauth_codes (
@@ -68,7 +71,8 @@ def init_db() -> None:
                 customer_id             TEXT NOT NULL,
                 login_customer_id       TEXT,
                 resource                TEXT,
-                expires_at              INTEGER NOT NULL
+                expires_at              INTEGER NOT NULL,
+                bing_rt_enc             TEXT
             );
 
             CREATE TABLE IF NOT EXISTS oauth_access_tokens (
@@ -78,7 +82,8 @@ def init_db() -> None:
                 google_rt_enc       TEXT NOT NULL,
                 customer_id         TEXT NOT NULL,
                 login_customer_id   TEXT,
-                expires_at          INTEGER
+                expires_at          INTEGER,
+                bing_rt_enc         TEXT
             );
 
             CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
@@ -88,7 +93,8 @@ def init_db() -> None:
                 google_rt_enc       TEXT NOT NULL,
                 customer_id         TEXT NOT NULL,
                 login_customer_id   TEXT,
-                expires_at          INTEGER
+                expires_at          INTEGER,
+                bing_rt_enc         TEXT
             );
 
             CREATE TABLE IF NOT EXISTS kv (
@@ -97,6 +103,22 @@ def init_db() -> None:
                 updated_at  INTEGER NOT NULL DEFAULT (unixepoch())
             );
         """)
+        conn.commit()
+
+        # Migrations for existing DBs (each ALTER TABLE is idempotent via try/except)
+        _migrations = [
+            "ALTER TABLE oauth_pending ADD COLUMN bing_state TEXT",
+            "ALTER TABLE oauth_pending ADD COLUMN customer_id TEXT",
+            "ALTER TABLE oauth_pending ADD COLUMN login_customer_id TEXT",
+            "ALTER TABLE oauth_codes ADD COLUMN bing_rt_enc TEXT",
+            "ALTER TABLE oauth_access_tokens ADD COLUMN bing_rt_enc TEXT",
+            "ALTER TABLE oauth_refresh_tokens ADD COLUMN bing_rt_enc TEXT",
+        ]
+        for sql in _migrations:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass
         conn.commit()
 
 
@@ -165,6 +187,30 @@ def delete_pending(google_state: str) -> None:
     _exec("DELETE FROM oauth_pending WHERE google_state = ?", (google_state,))
 
 
+def update_pending_bing_state(
+    google_state: str,
+    bing_state: str,
+    customer_id: str,
+    login_customer_id: str | None,
+) -> None:
+    _exec(
+        "UPDATE oauth_pending SET bing_state = ?, customer_id = ?, login_customer_id = ? WHERE google_state = ?",
+        (bing_state, customer_id, login_customer_id, google_state),
+    )
+
+
+def get_pending_by_bing_state(bing_state: str) -> dict | None:
+    row = _exec(
+        "SELECT * FROM oauth_pending WHERE bing_state = ?",
+        (bing_state,),
+    ).fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    d["scopes"] = json.loads(d["scopes"])
+    return d
+
+
 # ---------------------------------------------------------------------------
 # Authorization codes
 # ---------------------------------------------------------------------------
@@ -181,16 +227,17 @@ def save_code(
     login_customer_id: str | None,
     resource: str | None,
     expires_at: int,
+    bing_rt_enc: str | None = None,
 ) -> None:
     _exec(
         """INSERT INTO oauth_codes
                (code, client_id, redirect_uri, redirect_uri_explicit,
                 code_challenge, scopes, google_rt_enc, customer_id,
-                login_customer_id, resource, expires_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                login_customer_id, resource, expires_at, bing_rt_enc)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (code, client_id, redirect_uri, int(redirect_uri_explicit),
          code_challenge, json.dumps(scopes), google_rt_enc,
-         customer_id, login_customer_id, resource, expires_at),
+         customer_id, login_customer_id, resource, expires_at, bing_rt_enc),
     )
 
 
@@ -223,14 +270,15 @@ def save_access_token(
     customer_id: str,
     login_customer_id: str | None,
     expires_at: int | None,
+    bing_rt_enc: str | None = None,
 ) -> None:
     _exec(
         """INSERT INTO oauth_access_tokens
                (token, client_id, scopes, google_rt_enc,
-                customer_id, login_customer_id, expires_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                customer_id, login_customer_id, expires_at, bing_rt_enc)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (token, client_id, json.dumps(scopes), google_rt_enc,
-         customer_id, login_customer_id, expires_at),
+         customer_id, login_customer_id, expires_at, bing_rt_enc),
     )
 
 
@@ -262,14 +310,15 @@ def save_refresh_token(
     customer_id: str,
     login_customer_id: str | None,
     expires_at: int | None,
+    bing_rt_enc: str | None = None,
 ) -> None:
     _exec(
         """INSERT INTO oauth_refresh_tokens
                (token, client_id, scopes, google_rt_enc,
-                customer_id, login_customer_id, expires_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                customer_id, login_customer_id, expires_at, bing_rt_enc)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (token, client_id, json.dumps(scopes), google_rt_enc,
-         customer_id, login_customer_id, expires_at),
+         customer_id, login_customer_id, expires_at, bing_rt_enc),
     )
 
 
