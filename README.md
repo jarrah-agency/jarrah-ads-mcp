@@ -28,8 +28,6 @@ On first use the client opens Google sign-in. One accessible Ads account is sele
 | `get_conversion_actions` | Enabled conversions with 90-day volume |
 | `get_quality_scores` | Keyword quality score (1–10) with ad relevance, landing page, and expected CTR |
 | `get_ad_creative` | RSA headlines, descriptions, and final URLs for active ads |
-| `generate_keyword_ideas` | Keyword Planner ideas from seed keywords and/or a URL, with volume, competition, and bid estimates |
-| `get_keyword_historical_metrics` | Keyword Planner metrics for a known keyword list |
 | `bing_list_accounts` | List Microsoft Advertising accounts accessible with the configured credentials |
 | `bing_get_campaign_metrics` | Bing campaign daily spend, impressions, clicks, CTR, avg CPC, conversions, and revenue |
 | `bing_get_keyword_performance` | Bing keyword clicks, spend, avg CPC, CTR, quality score, conversions, and revenue |
@@ -41,14 +39,17 @@ On first use the client opens Google sign-in. One accessible Ads account is sele
 - `run_gaql` uses `search()` and is meant for ad-hoc queries of up to 100 rows. Include a `LIMIT`.
 - Include a date filter. The Google Ads API rejects most queries without one, for example `segments.date DURING LAST_30_DAYS`.
 - Customer ID dashes are stripped before the API call.
-- Keyword Planner needs billing on the Ads account. Accounts without spend may get search-volume ranges instead of exact numbers. Pass a country code such as `US` or `AU`.
+
+## Bing Ads note
+
+The hosted server connects Bing Ads tools to a single configured Microsoft Advertising account. If you need Bing tools pointed at your own account, run your own server and supply your own `BING_*` credentials.
 
 ## Run your own server
 
 The hosted app is the way to connect. To run a copy yourself:
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 cp .env.example .env
 SERVER_URL=http://localhost:8000 python3 -m jarrah_gads_mcp.server
 ```

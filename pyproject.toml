@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "jarrah-gads-mcp"
 version = "0.1.5"
-description = "MCP server for querying Google Ads via GAQL"
+description = "MCP server for Google Ads and Microsoft Advertising (Bing Ads)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
