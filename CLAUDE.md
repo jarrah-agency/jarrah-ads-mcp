@@ -160,8 +160,6 @@ middleware that rewrites `scope["path"]` from `/` to `/mcp` before the request r
 | `get_conversion_actions` | Enabled conversions with 90-day volume |
 | `get_quality_scores` | Keyword QS (1–10) with ad relevance, landing page, expected CTR |
 | `get_ad_creative` | RSA headlines, descriptions, final URLs for all active ads |
-| `generate_keyword_ideas` | **Non-functional under Basic API access (quota exhausted). Pending removal — see TODO in server.py.** |
-| `get_keyword_historical_metrics` | **Non-functional under Basic API access (quota exhausted). Pending removal — see TODO in server.py.** |
 | `bing_list_accounts` | List all Microsoft Advertising accounts accessible with the shared credentials |
 | `bing_get_campaign_metrics` | Bing campaign daily spend, impressions, clicks, CTR, avg CPC, conversions, and revenue |
 | `bing_get_keyword_performance` | Bing keyword clicks, spend, avg CPC, CTR, quality score, conversions, and revenue |
@@ -184,14 +182,7 @@ middleware that rewrites `scope["path"]` from `/` to `/mcp` before the request r
 
 ### Keyword Planner notes
 
-**These tools are non-functional under Basic API access and are pending removal.** `KeywordPlanIdeaService` has a separate, very tight quota that is exhausted immediately regardless of the general 15,000 ops/day Basic limit. Google rejected a Standard Access upgrade application in Nov 2026 (insufficient traffic). Reapply once other tool usage grows, or replace with a third-party keyword API (DataForSEO, SemRush). See TODO comment above `generate_keyword_ideas` in `server.py`.
-
-- Uses `KeywordPlanIdeaService.GenerateKeywordIdeas` — **not** `search` or `search_stream`.
-- Geo targeting uses a hardcoded `_COUNTRY_GEO_ID` dict in `google_ads.py` (ISO 3166-1 alpha-2 →
-  criteria ID, e.g. `AU=2036`, `US=2840`). Do **not** use `SuggestGeoTargetConstants` — it requires
-  `location_names` or `geo_targets` in the request body and errors if only `country_code` is set.
-- Seed objects (`KeywordSeed`, `UrlSeed`, `KeywordAndUrlSeed`) use proto-plus and do **not** have
-  `CopyFrom()`. Set fields directly on `request.keyword_seed`, `request.url_seed`, etc.
+**Removed.** `generate_keyword_ideas` and `get_keyword_historical_metrics` were deleted. `KeywordPlanIdeaService` requires Standard Access; Google rejected the upgrade application in Nov 2026 (insufficient traffic). To restore keyword research, implement via the **DataForSEO Keywords Data API** — no Google Ads Standard Access required.
 
 ## Deploying to Fly.io
 
