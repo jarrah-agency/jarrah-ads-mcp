@@ -356,9 +356,16 @@ def update_token_account(
     customer_id: str,
     login_customer_id: str | None,
 ) -> str | None:
-    """Update the customer_id/login_customer_id on an access token and all refresh
-    tokens that belong to the same client.  Returns the client_id, or None if the
-    access token was not found."""
+    """Update customer_id/login_customer_id on the specific access token only.
+
+    Does NOT update refresh tokens — doing so would affect all sessions sharing the
+    same client_id. The in-memory _account_overrides dict in server.py handles the
+    session-level switch immediately; this DB update ensures the access token row is
+    consistent. The switch persists until the access token expires (1 hour); after a
+    token refresh the session returns to the originally-authenticated account.
+
+    Returns the client_id, or None if the access token was not found.
+    """
     with _lock:
         conn = _get_conn()
         row = conn.execute(
@@ -371,10 +378,6 @@ def update_token_account(
         conn.execute(
             "UPDATE oauth_access_tokens SET customer_id = ?, login_customer_id = ? WHERE token = ?",
             (customer_id, login_customer_id, access_token),
-        )
-        conn.execute(
-            "UPDATE oauth_refresh_tokens SET customer_id = ?, login_customer_id = ? WHERE client_id = ?",
-            (customer_id, login_customer_id, client_id),
         )
         conn.commit()
     return client_id

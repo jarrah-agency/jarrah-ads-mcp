@@ -26,6 +26,7 @@ import secrets
 import time
 from datetime import date
 from typing import Any
+from html import escape as _h
 from urllib.parse import urlencode
 
 import httpx
@@ -178,8 +179,8 @@ async def switch_account(customer_id: str) -> str:
 
     Call list_accounts() first to see which accounts are accessible.
     The new account must be accessible with the authenticated user's Google credentials.
-    The switch persists for the life of the current MCP session (access + refresh tokens
-    are updated in the database).
+    The switch persists for the life of the current access token (up to 1 hour). After
+    a token refresh the session returns to the originally-authenticated account.
 
     Args:
         customer_id: The Google Ads customer ID to switch to (dashes optional).
@@ -489,7 +490,7 @@ async def google_callback(request: Request) -> Response:
 
     if error:
         return HTMLResponse(
-            f"<h2>Google authorization failed</h2><p>{error}</p>",
+            f"<h2>Google authorization failed</h2><p>{_h(error)}</p>",
             status_code=400,
         )
 
@@ -564,7 +565,9 @@ async def google_callback(request: Request) -> Response:
         )
 
     # Multiple accounts — show picker
-    return _render_picker(google_state, accounts)
+    client_data = await asyncio.to_thread(_db.get_client, pending["client_id"])
+    client_name = (client_data or {}).get("client_name") or pending["client_id"]
+    return _render_picker(google_state, accounts, client_name)
 
 
 @mcp.custom_route("/oauth/select-account", methods=["POST"])
@@ -622,8 +625,8 @@ async def microsoft_callback(request: Request) -> Response:
     if error:
         from urllib.parse import quote
         return HTMLResponse(
-            f"<h2>Microsoft authorization failed</h2><p>{error}</p>"
-            f"<p><a href='/oauth/microsoft/skip?state={quote(bing_state)}'>Continue with Google Ads only</a></p>",
+            f"<h2>Microsoft authorization failed</h2><p>{_h(error)}</p>"
+            f"<p><a href='/oauth/microsoft/skip?state={quote(bing_state, safe='')}'>Continue with Google Ads only</a></p>",
             status_code=400,
         )
 
@@ -751,13 +754,13 @@ async def _create_mcp_code(pending: dict, bing_rt_enc: str | None) -> Response:
     return RedirectResponse(redirect_uri + sep + urlencode(params), status_code=302)
 
 
-def _render_picker(google_state: str, accounts: list[dict]) -> HTMLResponse:
+def _render_picker(google_state: str, accounts: list[dict], client_name: str) -> HTMLResponse:
     rows = "\n".join(
         f"""<tr>
-              <td><input type="radio" name="customer_id" value="{a['id']}" required
+              <td><input type="radio" name="customer_id" value="{_h(a['id'])}" required
                   {'checked' if i == 0 else ''}></td>
-              <td>{a.get('name') or '(unnamed)'}</td>
-              <td>{a['id']}</td>
+              <td>{_h(a.get('name') or '(unnamed)')}</td>
+              <td>{_h(a['id'])}</td>
               <td>{'Manager' if a.get('is_manager') else 'Account'}</td>
             </tr>"""
         for i, a in enumerate(accounts)
@@ -780,9 +783,9 @@ def _render_picker(google_state: str, accounts: list[dict]) -> HTMLResponse:
 </head>
 <body>
   <h1>Select a Google Ads account</h1>
-  <p>Choose the account you want Claude to access:</p>
+  <p>Choose the account you want <strong>{_h(client_name)}</strong> to access:</p>
   <form method="POST" action="/oauth/select-account">
-    <input type="hidden" name="google_state" value="{google_state}">
+    <input type="hidden" name="google_state" value="{_h(google_state)}">
     <table>
       <thead><tr><th></th><th>Name</th><th>Account ID</th><th>Type</th></tr></thead>
       <tbody>{rows}</tbody>

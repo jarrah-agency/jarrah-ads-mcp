@@ -21,6 +21,10 @@ dependencies = [
     "bingads",
 ]
 
+[project.urls]
+Homepage = "https://jarrah.agency/tools/google-ads-mcp/"
+Repository = "https://github.com/jarrah-agency/jarrah-ads-mcp"
+
 [project.scripts]
 jarrah-ads-mcp = "jarrah_ads_mcp.server:main"
 
