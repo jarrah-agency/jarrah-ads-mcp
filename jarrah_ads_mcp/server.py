@@ -100,12 +100,19 @@ def _creds() -> tuple[str, str, str | None]:
     return token.google_refresh_token, token.customer_id, token.login_customer_id
 
 
-def _bing_rt() -> str | None:
-    """Return per-user Bing refresh token if available; None falls back to env token in bing_ads.py."""
+def _bing_rt() -> str:
+    """Return per-user Bing refresh token, or raise if this session has no Microsoft connection.
+
+    Raises RuntimeError rather than returning None so Bing tools never fall back to the
+    shared server-level BING_REFRESH_TOKEN env var.
+    """
     token = get_access_token()
-    if isinstance(token, GadsAccessToken):
-        return token.bing_refresh_token  # may be None for sessions created before Bing OAuth
-    return None
+    if isinstance(token, GadsAccessToken) and token.bing_refresh_token:
+        return token.bing_refresh_token
+    raise RuntimeError(
+        "This session has no Microsoft Advertising connection. "
+        "Reconnect and complete the Microsoft sign-in step to use Bing Ads tools."
+    )
 
 
 # ---------------------------------------------------------------------------

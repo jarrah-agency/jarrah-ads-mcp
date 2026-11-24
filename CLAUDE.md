@@ -44,7 +44,7 @@ There is no test suite.
 | `BING_DEVELOPER_TOKEN` | Yes (Bing) | Microsoft Advertising developer token |
 | `BING_CLIENT_ID` | Yes (Bing) | Azure AD app client ID |
 | `BING_CLIENT_SECRET` | Yes (Bing) | Azure AD app client secret |
-| `BING_REFRESH_TOKEN` | Yes (Bing) | Fallback refresh token for sessions created before per-user OAuth, and for self-hosters who skip the Microsoft login step |
+| `BING_REFRESH_TOKEN` | Yes (Bing) | Bootstrap token used only by `bing_ads.py` for the token-rotation persistence chain. MCP tool calls always use the per-user token; sessions without a Microsoft connection get a clear error from `_bing_rt()`. |
 | `PORT` | No | HTTP port (default 8000) |
 | `DB_PATH` | No | Path to SQLite DB (default: `gads_mcp.db` beside project root) |
 
@@ -176,7 +176,7 @@ middleware that rewrites `scope["path"]` from `/` to `/mcp` before the request r
 
 ### Bing Ads notes
 
-- Uses the `bingads` Python SDK (SOAP). Each user authenticates via Microsoft OAuth during the MCP connect flow; the per-user Bing refresh token is stored encrypted in SQLite alongside the Google token. Sessions that pre-date per-user OAuth, or users who skip the Microsoft step, fall back to `BING_REFRESH_TOKEN`.
+- Uses the `bingads` Python SDK (SOAP). Each user authenticates via Microsoft OAuth during the MCP connect flow; the per-user Bing refresh token is stored encrypted in SQLite alongside the Google token. Sessions without a Microsoft connection (skipped or pre-dating per-user OAuth) receive a `RuntimeError` from `_bing_rt()` when any Bing tool is called — they do not fall back to the shared `BING_REFRESH_TOKEN`.
 - Required env vars: `BING_DEVELOPER_TOKEN`, `BING_CLIENT_ID`, `BING_CLIENT_SECRET`, `BING_REFRESH_TOKEN`. All four must be set — a missing `BING_DEVELOPER_TOKEN` causes "Invalid client data" errors even if OAuth succeeds.
 - The Azure AD app must have `{SERVER_URL}/oauth/microsoft/callback` as an authorised redirect URI.
 - **Token rotation**: Microsoft rotates the refresh token on each use. `_exchange_refresh_token()` in `bing_ads.py` fetches the access token directly via `urllib` (bypassing the SDK's OAuth flow to control the exact scope). Rotated tokens are persisted in the SQLite `kv` table (keys `bing_refresh_token` / `bing_refresh_token_source`) so they survive process restarts. The `kv` table is keyed to a SHA-256 fingerprint of the env token, so a new Fly secret starts a fresh chain. **Do not run local token-exchange tests against the production `BING_REFRESH_TOKEN` — each use invalidates the previous token and can break the entire token family.**
