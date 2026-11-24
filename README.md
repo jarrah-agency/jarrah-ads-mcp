@@ -2,7 +2,7 @@
 
 A remote MCP server for Google Ads and Microsoft Advertising (Bing Ads). Each person signs in with their own Google and Microsoft accounts, and the server issues an MCP token carrying both sets of credentials for that session.
 
-Homepage: [jarrah.agency/tools/google-ads-mcp](https://jarrah.agency/tools/google-ads-mcp/)
+Homepage: [jarrah.agency/tools/google-and-bing-ads-mcp](https://jarrah.agency/tools/google-and-bing-ads-mcp/)
 
 The hosted server is [https://jarrah-gads-mcp.fly.dev](https://jarrah-gads-mcp.fly.dev).
 

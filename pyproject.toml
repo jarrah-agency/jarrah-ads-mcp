@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://jarrah.agency/tools/google-ads-mcp/"
+Homepage = "https://jarrah.agency/tools/google-and-bing-ads-mcp/"
 Repository = "https://github.com/jarrah-agency/jarrah-ads-mcp"
 
 [project.scripts]
