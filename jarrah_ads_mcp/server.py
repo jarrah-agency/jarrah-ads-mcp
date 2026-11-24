@@ -15,6 +15,9 @@ Optional:
                                 (auto-generated if absent, but tokens won't survive restarts)
   PORT                        — HTTP port (default 8000)
   DB_PATH                     — path to SQLite DB file (default: gads_mcp.db beside package)
+  BING_CLIENT_ID              — Azure AD client ID. When unset, sign-in finishes after
+                                Google and the Microsoft step is skipped.
+  BING_CLIENT_SECRET          — required only when BING_CLIENT_ID is set
 """
 from __future__ import annotations
 
@@ -41,6 +44,7 @@ from jarrah_ads_mcp import db as _db
 from jarrah_ads_mcp.auth_provider import (
     GadsAccessToken,
     GoogleAdsOAuthProvider,
+    _is_allowed_redirect_uri,
     decrypt,
     encrypt,
 )
@@ -51,6 +55,20 @@ log = logging.getLogger(__name__)
 
 SERVER_URL = os.environ.get("SERVER_URL", "http://localhost:8000").rstrip("/")
 PORT = int(os.environ.get("PORT", "8000"))
+
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'none'; style-src 'unsafe-inline'; "
+        "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+    ),
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
+
+def _html(content: str, status_code: int = 200) -> HTMLResponse:
+    return HTMLResponse(content, status_code=status_code, headers=_SECURITY_HEADERS)
 
 # ---------------------------------------------------------------------------
 # Initialise DB and build FastMCP server
@@ -534,25 +552,20 @@ async def google_callback(request: Request) -> Response:
     # Store encrypted refresh token in the pending row for the account picker
     await asyncio.to_thread(_db.update_pending_google_rt, google_state, google_rt_enc)
 
-    # List accessible Google Ads accounts
-    accounts: list[dict] = []
+    # List accessible Google Ads accounts. A failure here is retryable and must
+    # not fall through into saving an account id.
     try:
-        def _list_accounts():
-            from jarrah_ads_mcp.google_ads import list_accessible_customers
-            return list_accessible_customers(google_refresh_token)
-
-        accounts = await asyncio.to_thread(_list_accounts)
+        accounts = await asyncio.to_thread(_list_google_accounts, google_refresh_token)
     except Exception as exc:
         log.warning("Could not list accounts: %s", exc)
+        await asyncio.to_thread(_db.delete_pending, google_state)
+        return _accounts_unavailable_page(
+            "Start the connection again from your client."
+        )
 
     if not accounts:
-        # No accounts accessible — show error
         await asyncio.to_thread(_db.delete_pending, google_state)
-        return HTMLResponse(
-            "<h2>No Google Ads accounts found</h2>"
-            "<p>The authenticated Google account does not have access to any Google Ads accounts.</p>",
-            status_code=400,
-        )
+        return _no_accounts_page()
 
     if len(accounts) == 1:
         # Auto-select single account
@@ -586,17 +599,15 @@ async def select_account(request: Request) -> Response:
     if not pending.get("google_rt_enc"):
         return HTMLResponse("<h2>Session data missing</h2>", status_code=400)
 
-    # Re-list accounts to validate the selected_id and get login_customer_id
+    # Re-list accounts to validate the selected_id and get login_customer_id.
+    # If discovery fails, keep the pending session and do not store the submitted id.
     google_rt_enc = pending["google_rt_enc"]
     google_refresh_token = decrypt(google_rt_enc)
-    accounts: list[dict] = []
     try:
-        def _list():
-            from jarrah_ads_mcp.google_ads import list_accessible_customers
-            return list_accessible_customers(google_refresh_token)
-        accounts = await asyncio.to_thread(_list)
+        accounts = await asyncio.to_thread(_list_google_accounts, google_refresh_token)
     except Exception as exc:
         log.warning("Could not re-list accounts: %s", exc)
+        return _accounts_unavailable_page("Go back and try again.")
 
     return await _finalize_account(
         google_state=google_state,
@@ -637,13 +648,21 @@ async def microsoft_callback(request: Request) -> Response:
     if pending is None or pending["expires_at"] < int(time.time()):
         return HTMLResponse("<h2>Authorization expired or not found</h2>", status_code=400)
 
+    bing_client_id = os.environ.get("BING_CLIENT_ID", "").strip()
+    bing_client_secret = os.environ.get("BING_CLIENT_SECRET", "")
+    if not bing_client_id or not bing_client_secret:
+        return HTMLResponse(
+            "<h2>Microsoft sign-in is not configured on this server</h2>",
+            status_code=400,
+        )
+
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             "https://login.microsoftonline.com/common/oauth2/v2.0/token",
             data={
                 "code": ms_code,
-                "client_id": os.environ["BING_CLIENT_ID"],
-                "client_secret": os.environ["BING_CLIENT_SECRET"],
+                "client_id": bing_client_id,
+                "client_secret": bing_client_secret,
                 "redirect_uri": f"{SERVER_URL}/oauth/microsoft/callback",
                 "grant_type": "authorization_code",
                 "scope": "https://ads.microsoft.com/msads.manage offline_access",
@@ -684,6 +703,37 @@ async def microsoft_skip(request: Request) -> Response:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _bing_oauth_configured() -> bool:
+    """Microsoft sign-in runs only when an Azure AD client id is configured."""
+    return bool(os.environ.get("BING_CLIENT_ID", "").strip())
+
+
+def _list_google_accounts(refresh_token: str) -> list[dict]:
+    from jarrah_ads_mcp.google_ads import list_accessible_customers
+    return list_accessible_customers(refresh_token)
+
+
+def _norm_customer_id(customer_id: object) -> str:
+    return str(customer_id).replace("-", "").strip()
+
+
+def _no_accounts_page() -> HTMLResponse:
+    return _html(
+        "<h2>No Google Ads accounts found</h2>"
+        "<p>The authenticated Google account does not have access to any Google Ads accounts.</p>",
+        status_code=400,
+    )
+
+
+def _accounts_unavailable_page(retry: str) -> HTMLResponse:
+    return _html(
+        "<h2>Could not load your Google Ads accounts</h2>"
+        "<p>This is usually temporary, and no account was selected. "
+        f"{_h(retry)}</p>",
+        status_code=503,
+    )
+
+
 async def _finalize_account(
     google_state: str,
     pending: dict,
@@ -691,22 +741,65 @@ async def _finalize_account(
     accounts: list[dict],
     selected_id: str,
 ) -> Response:
-    """Store account selection in pending row and redirect to Microsoft OAuth."""
+    """Persist a discovered account, then continue to Microsoft or finish.
+
+    The submitted customer id is stored only when it matches an account just
+    returned by Google. Bing is skipped when BING_CLIENT_ID is unset.
+    """
+    if not _is_allowed_redirect_uri(pending["redirect_uri"]):
+        log.warning(
+            "Refusing to finish sign-in for client %s; redirect URI is not permitted",
+            pending["client_id"],
+        )
+        await asyncio.to_thread(_db.delete_pending, google_state)
+        return HTMLResponse(
+            "<h2>Redirect URI is not permitted</h2>",
+            status_code=400,
+        )
+
+    if not accounts:
+        await asyncio.to_thread(_db.delete_pending, google_state)
+        return _no_accounts_page()
+
+    selected = next(
+        (
+            a for a in accounts
+            if _norm_customer_id(a.get("id", "")) == _norm_customer_id(selected_id)
+        ),
+        None,
+    )
+    if selected is None:
+        client_data = await asyncio.to_thread(_db.get_client, pending["client_id"])
+        client_name = (client_data or {}).get("client_name") or pending["client_id"]
+        return _render_picker(
+            google_state,
+            accounts,
+            client_name,
+            error="That account is not available to this Google user. Choose one from the list.",
+            status_code=400,
+        )
+
     # Determine login_customer_id (for MCC access)
     managers = [a for a in accounts if a.get("is_manager")]
-    selected = next((a for a in accounts if a["id"] == selected_id), None)
     login_customer_id: str | None = None
-    if selected and not selected.get("is_manager") and len(managers) == 1:
+    if not selected.get("is_manager") and len(managers) == 1:
         login_customer_id = managers[0]["id"]
 
+    canonical_id = str(selected["id"])
     bing_state = secrets.token_urlsafe(32)
     await asyncio.to_thread(
         _db.update_pending_bing_state,
         google_state,
         bing_state,
-        selected_id,
+        canonical_id,
         login_customer_id,
     )
+
+    if not _bing_oauth_configured():
+        fresh = await asyncio.to_thread(_db.get_pending, google_state)
+        if fresh is None:
+            return HTMLResponse("<h2>Authorization expired</h2>", status_code=400)
+        return await _create_mcp_code(fresh, None)
 
     ms_params = urlencode({
         "client_id": os.environ["BING_CLIENT_ID"],
@@ -723,6 +816,17 @@ async def _finalize_account(
 
 async def _create_mcp_code(pending: dict, bing_rt_enc: str | None) -> Response:
     """Create MCP auth code and redirect back to the MCP client."""
+    if not _is_allowed_redirect_uri(pending["redirect_uri"]):
+        log.warning(
+            "Refusing to redirect client %s to a disallowed URI",
+            pending["client_id"],
+        )
+        await asyncio.to_thread(_db.delete_pending, pending["google_state"])
+        return HTMLResponse(
+            "<h2>Redirect URI is not permitted</h2>",
+            status_code=400,
+        )
+
     mcp_code = secrets.token_urlsafe(32)
     expires_at = int(time.time()) + 300  # 5-minute code lifetime
 
@@ -754,7 +858,13 @@ async def _create_mcp_code(pending: dict, bing_rt_enc: str | None) -> Response:
     return RedirectResponse(redirect_uri + sep + urlencode(params), status_code=302)
 
 
-def _render_picker(google_state: str, accounts: list[dict], client_name: str) -> HTMLResponse:
+def _render_picker(
+    google_state: str,
+    accounts: list[dict],
+    client_name: str,
+    error: str | None = None,
+    status_code: int = 200,
+) -> HTMLResponse:
     rows = "\n".join(
         f"""<tr>
               <td><input type="radio" name="customer_id" value="{_h(a['id'])}" required
@@ -764,6 +874,9 @@ def _render_picker(google_state: str, accounts: list[dict], client_name: str) ->
               <td>{'Manager' if a.get('is_manager') else 'Account'}</td>
             </tr>"""
         for i, a in enumerate(accounts)
+    )
+    error_html = (
+        f'<p style="color:#b00020;">{_h(error)}</p>' if error else ""
     )
     html = f"""<!DOCTYPE html>
 <html>
@@ -783,6 +896,7 @@ def _render_picker(google_state: str, accounts: list[dict], client_name: str) ->
 </head>
 <body>
   <h1>Select a Google Ads account</h1>
+  {error_html}
   <p>Choose the account you want <strong>{_h(client_name)}</strong> to access:</p>
   <form method="POST" action="/oauth/select-account">
     <input type="hidden" name="google_state" value="{_h(google_state)}">
@@ -794,7 +908,7 @@ def _render_picker(google_state: str, accounts: list[dict], client_name: str) ->
   </form>
 </body>
 </html>"""
-    return HTMLResponse(html)
+    return _html(html, status_code=status_code)
 
 
 # ---------------------------------------------------------------------------
