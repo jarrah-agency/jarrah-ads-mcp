@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 DB_PATH = os.environ.get(
@@ -23,17 +24,40 @@ def _get_conn() -> sqlite3.Connection:
             if _conn is None:
                 c = sqlite3.connect(DB_PATH, check_same_thread=False)
                 c.row_factory = sqlite3.Row
+                # Autocommit. Token exchange opens an explicit IMMEDIATE
+                # transaction so a failure cannot commit a partial swap.
+                c.isolation_level = None
                 c.execute("PRAGMA journal_mode=WAL")
                 _conn = c
     return _conn
 
 
 def _exec(sql: str, params: tuple = ()) -> sqlite3.Cursor:
+    """Run one statement. The connection is in autocommit mode."""
     with _lock:
         conn = _get_conn()
-        cur = conn.execute(sql, params)
-        conn.commit()
-        return cur
+        return conn.execute(sql, params)
+
+
+@contextmanager
+def _immediate_txn():
+    """BEGIN IMMEDIATE ... COMMIT, rolling back every statement on failure.
+
+    Holds the process lock for the whole transaction. Do not call ``_exec``
+    inside the block.
+    """
+    with _lock:
+        conn = _get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            yield conn
+            conn.commit()
+        except BaseException:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            raise
 
 
 def init_db() -> None:
@@ -94,7 +118,8 @@ def init_db() -> None:
                 customer_id         TEXT NOT NULL,
                 login_customer_id   TEXT,
                 expires_at          INTEGER,
-                bing_rt_enc         TEXT
+                bing_rt_enc         TEXT,
+                access_token        TEXT
             );
 
             CREATE TABLE IF NOT EXISTS kv (
@@ -113,6 +138,7 @@ def init_db() -> None:
             "ALTER TABLE oauth_codes ADD COLUMN bing_rt_enc TEXT",
             "ALTER TABLE oauth_access_tokens ADD COLUMN bing_rt_enc TEXT",
             "ALTER TABLE oauth_refresh_tokens ADD COLUMN bing_rt_enc TEXT",
+            "ALTER TABLE oauth_refresh_tokens ADD COLUMN access_token TEXT",
         ]
         for sql in _migrations:
             try:
@@ -258,6 +284,62 @@ def delete_code(code: str) -> None:
     _exec("DELETE FROM oauth_codes WHERE code = ?", (code,))
 
 
+def redeem_authorization_code(
+    code: str,
+    access_token: str,
+    refresh_token: str,
+    access_expires_at: int,
+    refresh_expires_at: int,
+) -> bool:
+    """Delete an authorization code and insert the tokens it issues, atomically.
+
+    Returns False when the code is already gone, so it can be redeemed once.
+    An insert failure rolls the deletion back.
+    """
+    with _immediate_txn() as conn:
+        row = conn.execute(
+            "DELETE FROM oauth_codes WHERE code = ? RETURNING *",
+            (code,),
+        ).fetchone()
+        if row is None:
+            return False
+        conn.execute(
+            """INSERT INTO oauth_access_tokens
+                   (token, client_id, scopes, google_rt_enc,
+                    customer_id, login_customer_id, expires_at, bing_rt_enc)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                access_token,
+                row["client_id"],
+                row["scopes"],
+                row["google_rt_enc"],
+                row["customer_id"],
+                row["login_customer_id"],
+                access_expires_at,
+                row["bing_rt_enc"],
+            ),
+        )
+        conn.execute(
+            """INSERT INTO oauth_refresh_tokens
+                   (token, client_id, scopes, google_rt_enc,
+                    customer_id, login_customer_id, expires_at, bing_rt_enc,
+                    access_token)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                refresh_token,
+                row["client_id"],
+                row["scopes"],
+                row["google_rt_enc"],
+                row["customer_id"],
+                row["login_customer_id"],
+                refresh_expires_at,
+                row["bing_rt_enc"],
+                access_token,
+            ),
+        )
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Access tokens
 # ---------------------------------------------------------------------------
@@ -295,7 +377,13 @@ def get_access_token_row(token: str) -> dict | None:
 
 
 def delete_access_token(token: str) -> None:
-    _exec("DELETE FROM oauth_access_tokens WHERE token = ?", (token,))
+    """Revoke an access token and any refresh token issued with it."""
+    with _immediate_txn() as conn:
+        conn.execute("DELETE FROM oauth_access_tokens WHERE token = ?", (token,))
+        conn.execute(
+            "DELETE FROM oauth_refresh_tokens WHERE access_token = ?",
+            (token,),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -335,7 +423,81 @@ def get_refresh_token_row(token: str) -> dict | None:
 
 
 def delete_refresh_token(token: str) -> None:
-    _exec("DELETE FROM oauth_refresh_tokens WHERE token = ?", (token,))
+    """Revoke a refresh token and the access token it was issued with."""
+    with _immediate_txn() as conn:
+        row = conn.execute(
+            "DELETE FROM oauth_refresh_tokens WHERE token = ? RETURNING access_token",
+            (token,),
+        ).fetchone()
+        if row and row["access_token"]:
+            conn.execute(
+                "DELETE FROM oauth_access_tokens WHERE token = ?",
+                (row["access_token"],),
+            )
+
+
+def rotate_refresh_token(
+    old_refresh_token: str,
+    new_access_token: str,
+    new_refresh_token: str,
+    scopes: list[str],
+    access_expires_at: int,
+    refresh_expires_at: int,
+) -> bool:
+    """Swap a refresh token for a new pair and revoke its previous access token.
+
+    Returns False when the old refresh token was already consumed. Any failure
+    after the delete rolls the whole swap back.
+    """
+    scope_json = json.dumps(scopes)
+    with _immediate_txn() as conn:
+        row = conn.execute(
+            "DELETE FROM oauth_refresh_tokens WHERE token = ? RETURNING *",
+            (old_refresh_token,),
+        ).fetchone()
+        if row is None:
+            return False
+        previous_access = row["access_token"]
+        if previous_access:
+            conn.execute(
+                "DELETE FROM oauth_access_tokens WHERE token = ?",
+                (previous_access,),
+            )
+        conn.execute(
+            """INSERT INTO oauth_access_tokens
+                   (token, client_id, scopes, google_rt_enc,
+                    customer_id, login_customer_id, expires_at, bing_rt_enc)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                new_access_token,
+                row["client_id"],
+                scope_json,
+                row["google_rt_enc"],
+                row["customer_id"],
+                row["login_customer_id"],
+                access_expires_at,
+                row["bing_rt_enc"],
+            ),
+        )
+        conn.execute(
+            """INSERT INTO oauth_refresh_tokens
+                   (token, client_id, scopes, google_rt_enc,
+                    customer_id, login_customer_id, expires_at, bing_rt_enc,
+                    access_token)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                new_refresh_token,
+                row["client_id"],
+                scope_json,
+                row["google_rt_enc"],
+                row["customer_id"],
+                row["login_customer_id"],
+                refresh_expires_at,
+                row["bing_rt_enc"],
+                new_access_token,
+            ),
+        )
+    return True
 
 
 def kv_get(key: str) -> str | None:
@@ -366,18 +528,15 @@ def update_token_account(
 
     Returns the client_id, or None if the access token was not found.
     """
-    with _lock:
-        conn = _get_conn()
+    with _immediate_txn() as conn:
         row = conn.execute(
             "SELECT client_id FROM oauth_access_tokens WHERE token = ?",
             (access_token,),
         ).fetchone()
         if row is None:
             return None
-        client_id = row["client_id"]
         conn.execute(
             "UPDATE oauth_access_tokens SET customer_id = ?, login_customer_id = ? WHERE token = ?",
             (customer_id, login_customer_id, access_token),
         )
-        conn.commit()
-    return client_id
+        return row["client_id"]
