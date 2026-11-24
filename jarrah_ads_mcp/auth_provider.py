@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import secrets
 import time
 from typing import Any
@@ -28,6 +29,8 @@ from mcp.server.auth.provider import (
     AuthorizationCode,
     AuthorizationParams,
     RefreshToken,
+    RegistrationError,
+    TokenError,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
@@ -37,23 +40,53 @@ log = logging.getLogger(__name__)
 
 _REFRESH_TOKEN_TTL = 60 * 60 * 24 * 90  # 90 days
 
+# Exact hosted callbacks for the MCP clients this server supports. Remote HTTPS
+# is otherwise refused: a client could register its own server as the callback
+# and receive the user's authorization code.
+# Sources checked Nov 2026:
+#   Claude — https://claude.com/docs/connectors/building/authentication
+#     (claude.com is the same callback on the other product host)
+#   Cursor — cursor.com/docs/mcp and the DCR set of three URIs (web, cursor://,
+#     and http://localhost:8787/callback, which the loopback rule covers)
+#   ChatGPT — https://developers.openai.com/plugins/build/auth
+#     (per-connection /connector/oauth/{id}, plus the stable URI used when the
+#     server advertises RFC 9207 issuer identification)
+#   VS Code — code.visualstudio.com MCP authorization guide and
+#     src/vs/base/common/oauth.ts (DCR sends both vscode.dev and insiders)
+_ALLOWED_REDIRECT_URIS = frozenset({
+    "https://claude.ai/api/mcp/auth_callback",
+    "https://claude.com/api/mcp/auth_callback",
+    "https://www.cursor.com/agents/mcp/oauth/callback",
+    "cursor://anysphere.cursor-mcp/oauth/callback",
+    "https://chatgpt.com/connector_platform_oauth_redirect",
+    "https://vscode.dev/redirect",
+    "https://insiders.vscode.dev/redirect",
+})
+# One path segment. fullmatch rejects queries, fragments, and extra segments.
+_CHATGPT_CALLBACK_RE = re.compile(
+    r"https://chatgpt\.com/connector/oauth/[A-Za-z0-9_-]{1,128}"
+)
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
 
 def _is_allowed_redirect_uri(uri: str) -> bool:
-    """Allow localhost/loopback HTTP(S) and any non-http/https URI scheme.
+    """Allow loopback http(s) on any port plus an exact allowlist of hosted callbacks.
 
-    HTTP(S) to remote hosts is blocked — it would let an attacker register a
-    client whose callback exfiltrates the user's Google token to their server.
-    Non-http(s) schemes (e.g. cursor://, claude://, vscode://) open a local
-    desktop app and are safe.
+    Loopback covers Claude Code, Cursor desktop (http://localhost:8787/callback),
+    VS Code's 127.0.0.1 listener, and the MCP Inspector (RFC 8252). Arbitrary
+    custom schemes (evil-app://, file://, intent://) are refused. Fragments and
+    userinfo are refused so a lookalike URI cannot smuggle another target.
     """
     try:
         parsed = urlparse(uri)
-        if parsed.scheme in ("http", "https"):
-            return parsed.hostname in ("localhost", "127.0.0.1")
-        # Custom URI schemes are safe (they open a local application)
-        return bool(parsed.scheme) and parsed.scheme not in ("javascript", "data", "")
-    except Exception:
+    except ValueError:
         return False
+    if parsed.fragment or parsed.username or parsed.password:
+        return False
+    scheme = (parsed.scheme or "").lower()
+    if scheme in ("http", "https") and parsed.hostname in _LOOPBACK_HOSTS:
+        return True
+    return uri in _ALLOWED_REDIRECT_URIS or bool(_CHATGPT_CALLBACK_RE.fullmatch(uri))
 
 # ---------------------------------------------------------------------------
 # Fernet encryption helpers
@@ -131,14 +164,32 @@ class GoogleAdsOAuthProvider:
         row = await asyncio.to_thread(_db.get_client, client_id)
         if row is None:
             return None
+        # Re-check stored registrations. A client saved before the allowlist
+        # existed must not keep a callback the server would now refuse.
+        raw_uris = row.get("redirect_uris") or []
+        allowed = [u for u in raw_uris if _is_allowed_redirect_uri(str(u))]
+        if not allowed:
+            log.warning("Client %s has no permitted redirect URIs; refusing", client_id)
+            return None
+        if len(allowed) != len(raw_uris):
+            log.warning("Client %s had disallowed redirect URIs removed", client_id)
+            row = {**row, "redirect_uris": allowed}
         return OAuthClientInformationFull.model_validate(row)
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
-        for uri in client_info.redirect_uris:
+        uris = list(client_info.redirect_uris or [])
+        if not uris:
+            raise RegistrationError(
+                error="invalid_redirect_uri",
+                error_description="At least one redirect URI is required",
+            )
+        for uri in uris:
             if not _is_allowed_redirect_uri(str(uri)):
-                raise ValueError(
-                    f"Redirect URI not permitted: {uri}. "
-                    "Only localhost/loopback HTTP(S) and custom URI schemes are accepted."
+                # RegistrationError -> HTTP 400 invalid_redirect_uri.
+                # ValueError was unhandled and surfaced as HTTP 500.
+                raise RegistrationError(
+                    error="invalid_redirect_uri",
+                    error_description=f"Redirect URI not permitted: {uri}",
                 )
         await asyncio.to_thread(
             _db.save_client,
@@ -214,35 +265,25 @@ class GoogleAdsOAuthProvider:
         client: OAuthClientInformationFull,
         authorization_code: GadsAuthCode,
     ) -> OAuthToken:
-        # Consume the code (single-use)
-        await asyncio.to_thread(_db.delete_code, authorization_code.code)
-
+        # Consume the code and store both new tokens in one transaction.
+        # A second redemption loses the DELETE and gets no tokens.
         access_token_str = secrets.token_urlsafe(32)
         refresh_token_str = secrets.token_urlsafe(32)
-        expires_at = int(time.time()) + 3600  # 1-hour access token
-
-        await asyncio.to_thread(
-            _db.save_access_token,
+        now = int(time.time())
+        redeemed = await asyncio.to_thread(
+            _db.redeem_authorization_code,
+            authorization_code.code,
             access_token_str,
-            authorization_code.client_id,
-            authorization_code.scopes,
-            authorization_code.google_rt_enc,
-            authorization_code.customer_id,
-            authorization_code.login_customer_id,
-            expires_at,
-            authorization_code.bing_rt_enc,
-        )
-        await asyncio.to_thread(
-            _db.save_refresh_token,
             refresh_token_str,
-            authorization_code.client_id,
-            authorization_code.scopes,
-            authorization_code.google_rt_enc,
-            authorization_code.customer_id,
-            authorization_code.login_customer_id,
-            int(time.time()) + _REFRESH_TOKEN_TTL,
-            authorization_code.bing_rt_enc,
+            now + 3600,
+            now + _REFRESH_TOKEN_TTL,
         )
+        if not redeemed:
+            log.warning("Authorization code was already redeemed")
+            raise TokenError(
+                error="invalid_grant",
+                error_description="Authorization code already used",
+            )
 
         return OAuthToken(
             access_token=access_token_str,
@@ -303,37 +344,27 @@ class GoogleAdsOAuthProvider:
         refresh_token: GadsRefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
-        # Rotate tokens
-        await asyncio.to_thread(_db.delete_refresh_token, refresh_token.token)
-
+        # Rotate the refresh token, revoke its previous access token, and store
+        # the new pair in one transaction. A failure rolls the old token back.
         new_access = secrets.token_urlsafe(32)
         new_refresh = secrets.token_urlsafe(32)
-        expires_at = int(time.time()) + 3600
-
         use_scopes = scopes or refresh_token.scopes
-
-        await asyncio.to_thread(
-            _db.save_access_token,
+        now = int(time.time())
+        rotated = await asyncio.to_thread(
+            _db.rotate_refresh_token,
+            refresh_token.token,
             new_access,
-            refresh_token.client_id,
-            use_scopes,
-            refresh_token.google_rt_enc,
-            refresh_token.customer_id,
-            refresh_token.login_customer_id,
-            expires_at,
-            refresh_token.bing_rt_enc,
-        )
-        await asyncio.to_thread(
-            _db.save_refresh_token,
             new_refresh,
-            refresh_token.client_id,
             use_scopes,
-            refresh_token.google_rt_enc,
-            refresh_token.customer_id,
-            refresh_token.login_customer_id,
-            int(time.time()) + _REFRESH_TOKEN_TTL,
-            refresh_token.bing_rt_enc,
+            now + 3600,
+            now + _REFRESH_TOKEN_TTL,
         )
+        if not rotated:
+            log.warning("Refresh token was already used")
+            raise TokenError(
+                error="invalid_grant",
+                error_description="Refresh token already used",
+            )
 
         return OAuthToken(
             access_token=new_access,

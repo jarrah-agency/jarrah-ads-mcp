@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "jarrah-ads-mcp"
-version = "0.1.5"
+version = "0.1.6"
 description = "MCP server for Google Ads and Microsoft Advertising (Bing Ads)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,6 +20,17 @@ dependencies = [
     "pyOpenSSL",
     "bingads",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
 
 [project.urls]
 Homepage = "https://jarrah.agency/tools/google-and-bing-ads-mcp/"
