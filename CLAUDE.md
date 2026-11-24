@@ -27,7 +27,7 @@ python3 -m build
 python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 
 # Regenerate Bing refresh token (safe — does not invalidate the production Fly token)
-python3 get_bing_refresh_token.py
+BING_CLIENT_ID=... BING_CLIENT_SECRET=... python3 get_bing_refresh_token.py
 ```
 
 There is no test suite.
@@ -39,7 +39,7 @@ There is no test suite.
 | `GOOGLE_ADS_DEVELOPER_TOKEN` | Yes | From Google Ads API Centre |
 | `GOOGLE_ADS_CLIENT_ID` | Yes | **Web application** OAuth client in Google Cloud Console |
 | `GOOGLE_ADS_CLIENT_SECRET` | Yes | Same Web application OAuth client |
-| `SERVER_URL` | Yes | Deployed base URL, e.g. `https://jarrah-ads-mcp.fly.dev` — no trailing slash |
+| `SERVER_URL` | Yes | Deployed base URL, e.g. `https://jarrah-gads-mcp.fly.dev` — no trailing slash |
 | `FERNET_KEY` | Recommended | Base64 Fernet key for encrypting Google refresh tokens in SQLite. Auto-generates one if absent (tokens lost on restart). |
 | `BING_DEVELOPER_TOKEN` | Yes (Bing) | Microsoft Advertising developer token |
 | `BING_CLIENT_ID` | Yes (Bing) | Azure AD app client ID |
@@ -195,12 +195,13 @@ middleware that rewrites `scope["path"]` from `/` to `/mcp` before the request r
 
 ## Deploying to Fly.io
 
-The app is deployed at `https://jarrah-ads-mcp.fly.dev` (region: `syd`, 512 MB RAM, persistent
-volume at `/data`).
+The app is deployed at `https://jarrah-gads-mcp.fly.dev` (region: `syd`, 512 MB RAM, persistent
+volume at `/data`). The Fly app name is `jarrah-gads-mcp` (Fly names are permanent; `fly.toml`
+matches this). The PyPI package and Python package directory are `jarrah-ads-mcp` / `jarrah_ads_mcp`.
 
 ```bash
 fly deploy                          # build and deploy
-fly logs --app jarrah-ads-mcp      # stream logs
+fly logs --app jarrah-gads-mcp      # stream logs
 fly machine restart <id>            # restart a crashed machine
 fly machine update <id> --vm-memory 512 --yes   # resize RAM
 fly secrets set KEY=value           # set env vars (triggers redeploy)
