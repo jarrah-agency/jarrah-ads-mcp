@@ -56,6 +56,20 @@ log = logging.getLogger(__name__)
 SERVER_URL = os.environ.get("SERVER_URL", "http://localhost:8000").rstrip("/")
 PORT = int(os.environ.get("PORT", "8000"))
 
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'none'; style-src 'unsafe-inline'; "
+        "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+    ),
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
+
+def _html(content: str, status_code: int = 200) -> HTMLResponse:
+    return HTMLResponse(content, status_code=status_code, headers=_SECURITY_HEADERS)
+
 # ---------------------------------------------------------------------------
 # Initialise DB and build FastMCP server
 # ---------------------------------------------------------------------------
@@ -704,7 +718,7 @@ def _norm_customer_id(customer_id: object) -> str:
 
 
 def _no_accounts_page() -> HTMLResponse:
-    return HTMLResponse(
+    return _html(
         "<h2>No Google Ads accounts found</h2>"
         "<p>The authenticated Google account does not have access to any Google Ads accounts.</p>",
         status_code=400,
@@ -712,7 +726,7 @@ def _no_accounts_page() -> HTMLResponse:
 
 
 def _accounts_unavailable_page(retry: str) -> HTMLResponse:
-    return HTMLResponse(
+    return _html(
         "<h2>Could not load your Google Ads accounts</h2>"
         "<p>This is usually temporary, and no account was selected. "
         f"{_h(retry)}</p>",
@@ -894,7 +908,7 @@ def _render_picker(
   </form>
 </body>
 </html>"""
-    return HTMLResponse(html, status_code=status_code)
+    return _html(html, status_code=status_code)
 
 
 # ---------------------------------------------------------------------------
