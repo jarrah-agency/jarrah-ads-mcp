@@ -1,6 +1,6 @@
 # jarrah-gads-mcp
 
-A remote MCP server for Google Ads. Each person signs in with their own Google account, chooses an Ads account, and the server issues an MCP token for that session.
+A remote MCP server for Google Ads and Microsoft Advertising (Bing Ads). Each person signs in with their own Google and Microsoft accounts, and the server issues an MCP token carrying both sets of credentials for that session.
 
 The hosted server is [https://jarrah-gads-mcp.fly.dev](https://jarrah-gads-mcp.fly.dev).
 
@@ -76,4 +76,4 @@ A production deploy needs a persistent disk for the SQLite database (`DB_PATH=/d
 
 ## Source
 
-[github.com/jarrah-agency/google-ads-mcp](https://github.com/jarrah-agency/google-ads-mcp)
+[github.com/jarrah-agency/jarrah-ads-mcp](https://github.com/jarrah-agency/jarrah-ads-mcp)
