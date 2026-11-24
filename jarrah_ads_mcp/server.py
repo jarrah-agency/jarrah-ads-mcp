@@ -36,8 +36,8 @@ from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from jarrah_gads_mcp import db as _db
-from jarrah_gads_mcp.auth_provider import (
+from jarrah_ads_mcp import db as _db
+from jarrah_ads_mcp.auth_provider import (
     GadsAccessToken,
     GoogleAdsOAuthProvider,
     decrypt,
@@ -127,7 +127,7 @@ async def run_gaql(query: str) -> str:
     audience_view, ad_group_ad, conversion_action.
     """
     refresh_token, customer_id, login_customer_id = _creds()
-    from jarrah_gads_mcp.google_ads_tools import run_gaql as _run
+    from jarrah_ads_mcp.google_ads_tools import run_gaql as _run
     return await _run(query, customer_id, refresh_token, login_customer_id)
 
 
@@ -141,7 +141,7 @@ async def list_accounts() -> list[dict]:
     refresh_token, _cid, _lcd = _creds()
 
     def _sync():
-        from jarrah_gads_mcp.google_ads import list_accessible_customers
+        from jarrah_ads_mcp.google_ads import list_accessible_customers
         return list_accessible_customers(refresh_token)
 
     return await asyncio.to_thread(_sync)
@@ -159,7 +159,7 @@ async def list_client_accounts(manager_id: str) -> list[dict]:
     refresh_token, _cid, _lcd = _creds()
 
     def _sync():
-        from jarrah_gads_mcp.google_ads import list_client_accounts as _list
+        from jarrah_ads_mcp.google_ads import list_client_accounts as _list
         return _list(refresh_token, manager_id)
 
     return await asyncio.to_thread(_sync)
@@ -187,7 +187,7 @@ async def switch_account(customer_id: str) -> str:
 
     # Validate the account is accessible with the current Google refresh token
     def _list():
-        from jarrah_gads_mcp.google_ads import list_accessible_customers
+        from jarrah_ads_mcp.google_ads import list_accessible_customers
         return list_accessible_customers(token.google_refresh_token)
 
     accounts: list[dict] = await asyncio.to_thread(_list)
@@ -203,7 +203,7 @@ async def switch_account(customer_id: str) -> str:
             mgr_id = mgr["id"].replace("-", "")
 
             def _list_clients(mid=mgr_id):
-                from jarrah_gads_mcp.google_ads import list_client_accounts as _lca
+                from jarrah_ads_mcp.google_ads import list_client_accounts as _lca
                 return _lca(token.google_refresh_token, mid)
 
             try:
@@ -257,7 +257,7 @@ async def get_campaign_metrics(start_date: str, end_date: str) -> list[dict]:
     end = date.fromisoformat(end_date)
 
     def _sync():
-        from jarrah_gads_mcp.google_ads import fetch_campaign_metrics
+        from jarrah_ads_mcp.google_ads import fetch_campaign_metrics
         df = fetch_campaign_metrics(refresh_token, customer_id, login_customer_id, start, end)
         records = df.to_dict(orient="records")
         for r in records:
@@ -278,7 +278,7 @@ async def get_conversion_actions() -> list[dict]:
     refresh_token, customer_id, login_customer_id = _creds()
 
     def _sync():
-        from jarrah_gads_mcp.google_ads import list_conversion_actions
+        from jarrah_ads_mcp.google_ads import list_conversion_actions
         return list_conversion_actions(refresh_token, customer_id, login_customer_id)
 
     return await asyncio.to_thread(_sync)
@@ -295,7 +295,7 @@ async def get_quality_scores() -> list[dict]:
     refresh_token, customer_id, login_customer_id = _creds()
 
     def _sync():
-        from jarrah_gads_mcp.google_ads import fetch_quality_scores
+        from jarrah_ads_mcp.google_ads import fetch_quality_scores
         df = fetch_quality_scores(refresh_token, customer_id, login_customer_id)
         return df.to_dict(orient="records")
 
@@ -319,7 +319,7 @@ async def get_ad_creative() -> list[dict]:
     refresh_token, customer_id, login_customer_id = _creds()
 
     def _sync():
-        from jarrah_gads_mcp.google_ads import fetch_ad_creative
+        from jarrah_ads_mcp.google_ads import fetch_ad_creative
         df = fetch_ad_creative(refresh_token, customer_id, login_customer_id)
         return df.to_dict(orient="records")
 
@@ -340,7 +340,7 @@ async def bing_list_accounts() -> list[dict]:
     bing_refresh_token = _bing_rt()
 
     def _sync():
-        from jarrah_gads_mcp.bing_ads import list_accounts
+        from jarrah_ads_mcp.bing_ads import list_accounts
         return list_accounts(bing_refresh_token)
 
     return await asyncio.to_thread(_sync)
@@ -366,7 +366,7 @@ async def bing_get_campaign_metrics(
     bing_refresh_token = _bing_rt()
 
     def _sync():
-        from jarrah_gads_mcp.bing_ads import fetch_campaign_metrics
+        from jarrah_ads_mcp.bing_ads import fetch_campaign_metrics
         df = fetch_campaign_metrics(account_id, start, end, bing_refresh_token)
         return df.to_dict(orient="records")
 
@@ -393,7 +393,7 @@ async def bing_get_keyword_performance(
     bing_refresh_token = _bing_rt()
 
     def _sync():
-        from jarrah_gads_mcp.bing_ads import fetch_keyword_performance
+        from jarrah_ads_mcp.bing_ads import fetch_keyword_performance
         df = fetch_keyword_performance(account_id, start, end, bing_refresh_token)
         return df.to_dict(orient="records")
 
@@ -413,7 +413,7 @@ async def bing_get_ad_creative(account_id: str) -> list[dict]:
     bing_refresh_token = _bing_rt()
 
     def _sync():
-        from jarrah_gads_mcp.bing_ads import fetch_ad_creative
+        from jarrah_ads_mcp.bing_ads import fetch_ad_creative
         return fetch_ad_creative(account_id, bing_refresh_token)
 
     return await asyncio.to_thread(_sync)
@@ -463,7 +463,7 @@ async def bing_run_report(
     bing_refresh_token = _bing_rt()
 
     def _sync():
-        from jarrah_gads_mcp.bing_ads import fetch_flexible_report
+        from jarrah_ads_mcp.bing_ads import fetch_flexible_report
         return fetch_flexible_report(account_id, report_type, columns, start, end, aggregation, bing_refresh_token)
 
     return await asyncio.to_thread(_sync)
@@ -530,7 +530,7 @@ async def google_callback(request: Request) -> Response:
     accounts: list[dict] = []
     try:
         def _list_accounts():
-            from jarrah_gads_mcp.google_ads import list_accessible_customers
+            from jarrah_ads_mcp.google_ads import list_accessible_customers
             return list_accessible_customers(google_refresh_token)
 
         accounts = await asyncio.to_thread(_list_accounts)
@@ -582,7 +582,7 @@ async def select_account(request: Request) -> Response:
     accounts: list[dict] = []
     try:
         def _list():
-            from jarrah_gads_mcp.google_ads import list_accessible_customers
+            from jarrah_ads_mcp.google_ads import list_accessible_customers
             return list_accessible_customers(google_refresh_token)
         accounts = await asyncio.to_thread(_list)
     except Exception as exc:

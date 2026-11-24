@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A remote HTTP MCP server exposing Google Ads and Microsoft Advertising (Bing Ads) tools. Users
 authenticate with their own Google and Microsoft accounts via OAuth 2.0, and the server issues MCP
-bearer tokens that carry both sets of credentials encrypted. Published to PyPI as `jarrah-gads-mcp`.
+bearer tokens that carry both sets of credentials encrypted. Published to PyPI as `jarrah-ads-mcp`.
 
 Derived from the Parabola AI app (`jarrah-agency/parabola-ai`) — `google_ads.py` and `google_ads_tools.py`
 are taken from that codebase.
@@ -18,7 +18,7 @@ are taken from that codebase.
 pip install -e .
 
 # Run locally
-SERVER_URL=http://localhost:8000 python3 -m jarrah_gads_mcp.server
+SERVER_URL=http://localhost:8000 python3 -m jarrah_ads_mcp.server
 
 # Build PyPI package
 python3 -m build
@@ -39,7 +39,7 @@ There is no test suite.
 | `GOOGLE_ADS_DEVELOPER_TOKEN` | Yes | From Google Ads API Centre |
 | `GOOGLE_ADS_CLIENT_ID` | Yes | **Web application** OAuth client in Google Cloud Console |
 | `GOOGLE_ADS_CLIENT_SECRET` | Yes | Same Web application OAuth client |
-| `SERVER_URL` | Yes | Deployed base URL, e.g. `https://jarrah-gads-mcp.fly.dev` — no trailing slash |
+| `SERVER_URL` | Yes | Deployed base URL, e.g. `https://jarrah-ads-mcp.fly.dev` — no trailing slash |
 | `FERNET_KEY` | Recommended | Base64 Fernet key for encrypting Google refresh tokens in SQLite. Auto-generates one if absent (tokens lost on restart). |
 | `BING_DEVELOPER_TOKEN` | Yes (Bing) | Microsoft Advertising developer token |
 | `BING_CLIENT_ID` | Yes (Bing) | Azure AD app client ID |
@@ -54,7 +54,7 @@ needed** — credentials are obtained per-user via the OAuth flow.
 ## Architecture
 
 ```
-jarrah_gads_mcp/
+jarrah_ads_mcp/
   db.py            — SQLite CRUD (sync functions, called via asyncio.to_thread)
   auth_provider.py — GoogleAdsOAuthProvider implementing OAuthAuthorizationServerProvider
   server.py        — FastMCP server with auth, tools, and custom routes
@@ -64,7 +64,7 @@ jarrah_gads_mcp/
 ```
 
 Root-level `server.py`, `google_ads.py`, and `google_ads_tools.py` are the original stdio-based
-versions kept for reference only. `jarrah_gads_mcp/server.py` is the authoritative remote version
+versions kept for reference only. `jarrah_ads_mcp/server.py` is the authoritative remote version
 used by the PyPI entry point. `AGENTS.md` is a stale duplicate of this file (pre-Bing Ads).
 
 ### Tool development pattern
@@ -89,7 +89,7 @@ async def bing_something(account_id: str, start_date: str, end_date: str) -> lis
     end = date.fromisoformat(end_date)
     bing_refresh_token = _bing_rt()
     def _sync():
-        from jarrah_gads_mcp.bing_ads import fetch_something
+        from jarrah_ads_mcp.bing_ads import fetch_something
         return fetch_something(account_id, start, end, bing_refresh_token).to_dict(orient="records")
     return await asyncio.to_thread(_sync)
 ```
@@ -195,12 +195,12 @@ middleware that rewrites `scope["path"]` from `/` to `/mcp` before the request r
 
 ## Deploying to Fly.io
 
-The app is deployed at `https://jarrah-gads-mcp.fly.dev` (region: `syd`, 512 MB RAM, persistent
+The app is deployed at `https://jarrah-ads-mcp.fly.dev` (region: `syd`, 512 MB RAM, persistent
 volume at `/data`).
 
 ```bash
 fly deploy                          # build and deploy
-fly logs --app jarrah-gads-mcp      # stream logs
+fly logs --app jarrah-ads-mcp      # stream logs
 fly machine restart <id>            # restart a crashed machine
 fly machine update <id> --vm-memory 512 --yes   # resize RAM
 fly secrets set KEY=value           # set env vars (triggers redeploy)
@@ -223,7 +223,7 @@ To release a new version:
    The only expected match is the package source files. If `.env` appears, stop — do not upload.
 4. `PYPI_TOKEN=$(grep pypi_token .env | awk '{print $2}') && twine upload dist/* -u __token__ -p "$PYPI_TOKEN"`
 
-The PyPI token is stored as `pypi_token` in `.env`. If upload returns 403, the token has expired — generate a new one at pypi.org/manage/account/token/ scoped to `jarrah-gads-mcp`.
+The PyPI token is stored as `pypi_token` in `.env`. If upload returns 403, the token has expired — generate a new one at pypi.org/manage/account/token/ scoped to `jarrah-ads-mcp`.
 
 Note: Fly.io deploys install from local source via Docker (`pip install .`), so a PyPI release is not required to deploy.
 

@@ -1,15 +1,15 @@
-# jarrah-gads-mcp
+# jarrah-ads-mcp
 
 A remote MCP server for Google Ads and Microsoft Advertising (Bing Ads). Each person signs in with their own Google and Microsoft accounts, and the server issues an MCP token carrying both sets of credentials for that session.
 
-The hosted server is [https://jarrah-gads-mcp.fly.dev](https://jarrah-gads-mcp.fly.dev).
+The hosted server is [https://jarrah-ads-mcp.fly.dev](https://jarrah-ads-mcp.fly.dev).
 
 ## Connect
 
 Add this URL as a remote MCP server in Claude or any client that supports streamable HTTP and OAuth:
 
 ```text
-https://jarrah-gads-mcp.fly.dev
+https://jarrah-ads-mcp.fly.dev
 ```
 
 The MCP endpoint is `/mcp`. Clients that POST to the site root are forwarded there.
@@ -51,7 +51,7 @@ The hosted app is the way to connect. To run a copy yourself:
 ```bash
 pip install -e .
 cp .env.example .env
-SERVER_URL=http://localhost:8000 python3 -m jarrah_gads_mcp.server
+SERVER_URL=http://localhost:8000 python3 -m jarrah_ads_mcp.server
 ```
 
 | Variable | Required | Notes |
@@ -72,7 +72,7 @@ Google and Microsoft refresh tokens are collected per user during OAuth. They ar
 
 In Google Cloud Console, add `{SERVER_URL}/oauth/google/callback` as an authorized redirect URI on the web OAuth client. In the Azure portal, add `{SERVER_URL}/oauth/microsoft/callback` as a redirect URI on the Azure AD app.
 
-A production deploy needs a persistent disk for the SQLite database (`DB_PATH=/data/gads_mcp.db`) and at least 512 MB of RAM. The running server for this repo is on Fly.io in `syd`: [jarrah-gads-mcp.fly.dev](https://jarrah-gads-mcp.fly.dev).
+A production deploy needs a persistent disk for the SQLite database (`DB_PATH=/data/gads_mcp.db`) and at least 512 MB of RAM. The running server for this repo is on Fly.io in `syd`: [jarrah-ads-mcp.fly.dev](https://jarrah-ads-mcp.fly.dev).
 
 ## Source
 

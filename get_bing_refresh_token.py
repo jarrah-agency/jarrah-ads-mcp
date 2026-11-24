@@ -8,7 +8,7 @@ exchanges the code for tokens, and prints the refresh token.
 
 Prerequisites:
     http://localhost:8080 must be added as a redirect URI on the Azure app:
-    Azure Portal → Microsoft Entra ID → App registrations → jarrah-gads-mcp
+    Azure Portal → Microsoft Entra ID → App registrations → jarrah-ads-mcp
     → Authentication → Add a platform → Web → http://localhost:8080
 """
 import http.server

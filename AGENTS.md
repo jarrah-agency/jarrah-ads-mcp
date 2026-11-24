@@ -6,7 +6,7 @@ This file provides guidance to Codex (claude.ai/code) when working with code in 
 
 A remote HTTP MCP server exposing Google Ads tools. Users authenticate with their own Google accounts
 via OAuth 2.0, select a Google Ads account, and the server issues MCP bearer tokens that carry their
-credentials. Published to PyPI as `jarrah-gads-mcp`.
+credentials. Published to PyPI as `jarrah-ads-mcp`.
 
 Derived from the Parabola AI app (`jarrah-agency/parabola-ai`) — `google_ads.py` and `google_ads_tools.py`
 are taken from that codebase.
@@ -16,7 +16,7 @@ are taken from that codebase.
 ```bash
 pip install -r requirements.txt
 cp .env.example .env   # fill in SERVER_URL, GOOGLE_ADS_* credentials, FERNET_KEY
-SERVER_URL=http://localhost:8000 python3 -m jarrah_gads_mcp.server
+SERVER_URL=http://localhost:8000 python3 -m jarrah_ads_mcp.server
 ```
 
 ## Environment variables
@@ -37,7 +37,7 @@ needed** — credentials are obtained per-user via the OAuth flow.
 ## Architecture
 
 ```
-jarrah_gads_mcp/
+jarrah_ads_mcp/
   db.py            — SQLite CRUD (sync functions, called via asyncio.to_thread)
   auth_provider.py — GoogleAdsOAuthProvider implementing OAuthAuthorizationServerProvider
   server.py        — FastMCP server with auth, tools, and custom routes
@@ -45,7 +45,7 @@ jarrah_gads_mcp/
   google_ads_tools.py — run_gaql() async wrapper with JSON output
 ```
 
-Root-level `server.py` is the original stdio version kept for reference; `jarrah_gads_mcp/server.py`
+Root-level `server.py` is the original stdio version kept for reference; `jarrah_ads_mcp/server.py`
 is the authoritative remote version used by the PyPI entry point.
 
 ### OAuth flow
@@ -113,11 +113,11 @@ This works because `AuthContextMiddleware` stores the authenticated user in a co
 5. In Google Cloud Console: add `https://<your-app>.up.railway.app/oauth/google/callback`
    as an authorized redirect URI for your **Web application** OAuth client
 
-The entry command is `jarrah-gads-mcp` (from the PyPI entry point) or:
+The entry command is `jarrah-ads-mcp` (from the PyPI entry point) or:
 ```
-uvicorn jarrah_gads_mcp.server:mcp.streamable_http_app() --host 0.0.0.0 --port $PORT
+uvicorn jarrah_ads_mcp.server:mcp.streamable_http_app() --host 0.0.0.0 --port $PORT
 ```
-Actually just run `python3 -m jarrah_gads_mcp.server` or `jarrah-gads-mcp`.
+Actually just run `python3 -m jarrah_ads_mcp.server` or `jarrah-ads-mcp`.
 
 ## PyPI package
 

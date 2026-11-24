@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "jarrah-gads-mcp"
+name = "jarrah-ads-mcp"
 version = "0.1.5"
 description = "MCP server for Google Ads and Microsoft Advertising (Bing Ads)"
 readme = "README.md"
@@ -22,10 +22,10 @@ dependencies = [
 ]
 
 [project.scripts]
-jarrah-gads-mcp = "jarrah_gads_mcp.server:main"
+jarrah-ads-mcp = "jarrah_ads_mcp.server:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["jarrah_gads_mcp"]
+packages = ["jarrah_ads_mcp"]
 
 [tool.hatch.build.targets.sdist]
 exclude = [

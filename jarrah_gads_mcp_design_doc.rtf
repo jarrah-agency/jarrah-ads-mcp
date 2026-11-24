@@ -1,0 +1,194 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2822
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Arial-BoldMT;\f1\fswiss\fcharset0 ArialMT;\f2\froman\fcharset0 TimesNewRomanPSMT;
+\f3\fmodern\fcharset0 CourierNewPSMT;\f4\froman\fcharset0 TimesNewRomanPS-BoldMT;}
+{\colortbl;\red255\green255\blue255;\red0\green70\blue127;}
+{\*\expandedcolortbl;;\csgenericrgb\c0\c27451\c49804;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww20160\viewh14740\viewkind0
+\hyphauto1\hyphfactor90
+\deftab720
+\pard\pardeftab720\sb480\qc\partightenfactor0
+
+\f0\b\fs36 \cf2 Jarrah Google Ads MCP Server\
+\pard\pardeftab720\qc\partightenfactor0
+
+\fs24 \cf0 Design Documentation\
+\pard\pardeftab720\qc\partightenfactor0
+
+\f1\b0\fs20 \cf0 Version 0.1.5 \'96 November 2026\
+Jarrah Agency\
+\pard\pardeftab720\sb360\partightenfactor0
+
+\f0\b\fs28 \cf2 1. Tool Overview\
+\pard\pardeftab720\sb120\partightenfactor0
+
+\f2\b0\fs22 \cf0 Jarrah Google Ads MCP Server is a remote HTTP server that exposes Google Ads API functionality as tools consumable by AI assistants via the Model Context Protocol (MCP). The server enables marketing professionals and agencies to query Google Ads campaign data, keyword performance,ad creative, conversion tracking, and Keyword Planner insights directly within AI-assisted workflows.\
+The server is published as an open-source Python package (
+\f3 jarrah-gads-mcp
+\f2 ) and deployed to the cloud at 
+\f3 jarrah-gads-mcp.fly.dev
+\f2 . It is intended for use by advertising agencie sand in-house marketing teams who manage Google Ads accounts.\
+\pard\pardeftab720\sb360\partightenfactor0
+
+\f0\b\fs28 \cf2 2. Authentication Architecture\
+\pard\pardeftab720\sb120\partightenfactor0
+
+\f2\b0\fs22 \cf0 The server implements the OAuth 2.0 Authorization Code Flow using Google as the identity provider.Each user authenticates individually with their own Google account. The server never stores orshares credentials across users.\
+\pard\pardeftab720\sb120\partightenfactor0
+
+\f4\b \cf0 Authentication flow:
+\f2\b0 \
+\pard\pardeftab720\li720\sb60\partightenfactor0
+
+\f4\b \cf0 1.
+\f2\b0 	The MCP client (AI assistant) redirects the user to the server\'92s 
+\f3 /authorize
+\f2  endpoint.\
+
+\f4\b 2.
+\f2\b0 	The server redirects to Google\'92s OAuth 2.0 consent screen, requesting the 
+\f3 https://www.googleapis.com/auth/adwords
+\f2  scope.\
+
+\f4\b 3.
+\f2\b0 	After the user grants consent, Google returns an authorization code to the server\'92s callback endpoint (
+\f3 /oauth/google/callback
+\f2 ).\
+
+\f4\b 4.
+\f2\b0 	The server exchanges the code for a Google refresh token, lists the user\'92s accessible Google Ads accounts, and issues an MCP bearer token to the client.\
+
+\f4\b 5.
+\f2\b0 	The MCP bearer token carries an encrypted copy of the user\'92s Google refresh token (Fernet symmetric encryption) and their selected Google Ads customer ID.\
+
+\f4\b 6.
+\f2\b0 	Each tool call verifies the bearer token and uses the decrypted Google refresh token to obtain a short-lived Google access token for the API request.\
+\pard\pardeftab720\sb120\partightenfactor0
+\cf0 Google refresh tokens are stored encrypted at rest in a SQLite database using a Fernet key storedas an environment secret on the deployment platform. Tokens are never logged or transmitted inplaintext.\
+\pard\pardeftab720\sb360\partightenfactor0
+
+\f0\b\fs28 \cf2 3. Google Ads API Usage\
+\pard\pardeftab720\sb120\partightenfactor0
+
+\f2\b0\fs22 \cf0 The server uses the official 
+\f3 google-ads-python
+\f2  client library to make all Google Ads API requests. All requests are made on behalf of the authenticated user, using their own Google Ads credentials and against their own Google Ads customer accounts. The server has no access to anyGoogle Ads account the user has not explicitly authorized.\
+\pard\pardeftab720\sb240\partightenfactor0
+
+\f0\b\fs24 \cf0 3.1 Services and Methods Used\
+\pard\pardeftab720\sb120\partightenfactor0
+
+\f4\fs22 \cf0 GoogleAdsService.search()
+\f2\b0  \'96 Used for ad-hoc GAQL queries covering campaign metrics,conversion actions, keyword quality scores, and ad creative retrieval.\
+\pard\pardeftab720\sb60\partightenfactor0
+
+\f4\b \cf0 KeywordPlanIdeaService.GenerateKeywordIdeas()
+\f2\b0  \'96 Used to discover new keyword ideasfrom seed keywords or a URL, returning monthly search volume estimates, competition level, andbid range estimates.\
+
+\f4\b KeywordPlanIdeaService.GenerateKeywordHistoricalMetrics()
+\f2\b0  \'96 Used to retrieve historicalmonthly search volume and competition metrics for a provided list of keywords.\
+\pard\pardeftab720\sb240\partightenfactor0
+
+\f0\b\fs24 \cf0 3.2 Exposed Tools\
+\pard\pardeftab720\sb120\partightenfactor0
+
+\f2\b0\fs22 \cf0 The following read-only tools are exposed to AI assistant users:\
+\pard\pardeftab720\li720\sb60\partightenfactor0
+
+\f4\b \cf0 run_gaql
+\f2\b0  \'96 Execute a GAQL query against the authenticated account.\
+
+\f4\b list_accounts
+\f2\b0  \'96 List all Google Ads accounts accessible to the authenticated user.\
+
+\f4\b list_client_accounts
+\f2\b0  \'96 List leaf accounts under a manager (MCC) account.\
+
+\f4\b switch_account
+\f2\b0  \'96 Switch the active session to a different accessible account.\
+
+\f4\b get_campaign_metrics
+\f2\b0  \'96 Retrieve spend, impressions, clicks, and impression share by date, device, and channel.\
+
+\f4\b get_conversion_actions
+\f2\b0  \'96 List enabled conversion actions with 90-day conversion volume.\
+
+\f4\b get_quality_scores
+\f2\b0  \'96 Retrieve keyword Quality Scores (1\'9610) with component breakdowns.\
+
+\f4\b get_ad_creative
+\f2\b0  \'96 Retrieve RSA headlines, descriptions, and final URLs for active ads.\
+
+\f4\b generate_keyword_ideas
+\f2\b0  \'96 Discover new keywords from seeds or a URL using Keyword Planner.\
+
+\f4\b get_keyword_historical_metrics
+\f2\b0  \'96 Fetch historical search volume metrics for a list of keywords.\
+\pard\pardeftab720\sb360\partightenfactor0
+
+\f0\b\fs28 \cf2 4. Data Access and Privacy\
+\pard\pardeftab720\sb120\partightenfactor0
+
+\f4\fs22 \cf0 Read-only access:
+\f2\b0  All Google Ads API calls made by this server are read-only reporting and planning queries. The server does not create, modify, or delete any campaigns, ad groups, ads,keywords, bids, or budgets. No write operations are performed against Google Ads.\
+
+\f4\b Scope of access:
+\f2\b0  The server requests only the 
+\f3 https://www.googleapis.com/auth/adwords
+\f2 OAuth scope, which is the standard scope required by the Google Ads API.\
+
+\f4\b Data retention:
+\f2\b0  Encrypted Google refresh tokens are stored in SQLite only for the durationof the user\'92s MCP session. MCP access tokens expire after 1 hour. No Google Ads campaigndata, keyword data, or report data is stored server-side; query results are returned directly to the requesting AI assistant client and not persisted.\
+
+\f4\b Multi-user isolation:
+\f2\b0  Each MCP session is independently authenticated. Users can only access accounts their own Google credentials have permission to access. There is no shared credentia lpool for Google Ads.\
+\pard\pardeftab720\sb360\partightenfactor0
+
+\f0\b\fs28 \cf2 5. Technical Stack\
+\pard\pardeftab720\sb120\partightenfactor0
+
+\f4\fs22 \cf0 Language:
+\f2\b0  Python 3.12\
+\pard\pardeftab720\sb60\partightenfactor0
+
+\f4\b \cf0 Framework:
+\f2\b0  FastMCP (Model Context Protocol) with Uvicorn / Starlette\
+
+\f4\b Google Ads client:
+\f2\b0  
+\f3 google-ads
+\f2  Python SDK (official Google client library)\
+
+\f4\b Deployment:
+\f2\b0  Fly.io (Sydney region), single instance, 512 MB RAM\
+
+\f4\b Storage:
+\f2\b0  SQLite on a persistent encrypted volume (OAuth tokens only; no campaign data)\
+
+\f4\b Source code:
+\f2\b0  Publicly available at 
+\f3 github.com/jarrah-agency/google-ads-mcp
+\f2 \
+\pard\pardeftab720\sb360\partightenfactor0
+
+\f0\b\fs28 \cf2 6. Intended Use Cases\
+\pard\pardeftab720\sb120\partightenfactor0
+
+\f4\fs22 \cf0 Agency reporting:
+\f2\b0  Marketing agency staff pull campaign performance data into AI-assisted analysis workflows, replacing manual report exports from the Google Ads UI.\
+
+\f4\b Keyword research:
+\f2\b0  Account managers use the Keyword Planner tools to discover and evaluate keywords for new campaigns or ad groups directly within an AI chat interface.\
+
+\f4\b Account auditing:
+\f2\b0  Practitioners audit accounts for low Quality Scores, missing conversion tracking, or underperforming campaigns using GAQL and quality score tools.\
+
+\f4\b Multi-account management:
+\f2\b0  Agency users with MCC access list and switch between client accounts within a single authenticated session.\
+\pard\pardeftab720\sb360\partightenfactor0
+
+\f0\b\fs28 \cf2 7. Developer Token Usage\
+\pard\pardeftab720\sb120\partightenfactor0
+
+\f2\b0\fs22 \cf0 A single developer token is used server-side to authenticate all Google Ads API requests.The token is stored as an environment secret on the deployment platform and is never exposed to end users. All API requests are made on behalf of individual users who have granted explicitOAuth consent; the developer token identifies the application, not the user.\
+Expected API request volume is low to moderate. The server is used by a small number ofmarketing practitioners at Jarrah Agency and the clients they serve, making on-demand queries rather than scheduled batch jobs. Keyword Planner requests are user-initiated and not automated.\
+}

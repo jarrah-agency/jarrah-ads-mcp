@@ -41,8 +41,8 @@ def _ensure_refresh_token() -> str:
     token = _env_refresh_token
     if _env_refresh_token:
         try:
-            from jarrah_gads_mcp import db as _db
-            from jarrah_gads_mcp.auth_provider import decrypt
+            from jarrah_ads_mcp import db as _db
+            from jarrah_ads_mcp.auth_provider import decrypt
 
             _db.init_db()
             stored = _db.kv_get("bing_refresh_token")
@@ -63,8 +63,8 @@ def _persist_refresh_token(new_rt: str) -> None:
     if not _env_refresh_token:
         return
     try:
-        from jarrah_gads_mcp import db as _db
-        from jarrah_gads_mcp.auth_provider import encrypt
+        from jarrah_ads_mcp import db as _db
+        from jarrah_ads_mcp.auth_provider import encrypt
 
         _db.init_db()
         _db.kv_set("bing_refresh_token", encrypt(new_rt))

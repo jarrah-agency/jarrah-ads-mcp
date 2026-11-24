@@ -30,7 +30,7 @@ from mcp.server.auth.provider import (
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
-from jarrah_gads_mcp import db as _db
+from jarrah_ads_mcp import db as _db
 
 log = logging.getLogger(__name__)
 
