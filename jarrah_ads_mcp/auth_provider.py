@@ -20,6 +20,7 @@ import os
 import secrets
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet
 from mcp.server.auth.provider import (
@@ -33,6 +34,26 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from jarrah_ads_mcp import db as _db
 
 log = logging.getLogger(__name__)
+
+_REFRESH_TOKEN_TTL = 60 * 60 * 24 * 90  # 90 days
+
+
+def _is_allowed_redirect_uri(uri: str) -> bool:
+    """Allow localhost/loopback HTTP(S) and any non-http/https URI scheme.
+
+    HTTP(S) to remote hosts is blocked — it would let an attacker register a
+    client whose callback exfiltrates the user's Google token to their server.
+    Non-http(s) schemes (e.g. cursor://, claude://, vscode://) open a local
+    desktop app and are safe.
+    """
+    try:
+        parsed = urlparse(uri)
+        if parsed.scheme in ("http", "https"):
+            return parsed.hostname in ("localhost", "127.0.0.1")
+        # Custom URI schemes are safe (they open a local application)
+        return bool(parsed.scheme) and parsed.scheme not in ("javascript", "data", "")
+    except Exception:
+        return False
 
 # ---------------------------------------------------------------------------
 # Fernet encryption helpers
@@ -113,6 +134,12 @@ class GoogleAdsOAuthProvider:
         return OAuthClientInformationFull.model_validate(row)
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        for uri in client_info.redirect_uris:
+            if not _is_allowed_redirect_uri(str(uri)):
+                raise ValueError(
+                    f"Redirect URI not permitted: {uri}. "
+                    "Only localhost/loopback HTTP(S) and custom URI schemes are accepted."
+                )
         await asyncio.to_thread(
             _db.save_client,
             client_info.client_id,
@@ -213,7 +240,7 @@ class GoogleAdsOAuthProvider:
             authorization_code.google_rt_enc,
             authorization_code.customer_id,
             authorization_code.login_customer_id,
-            None,  # refresh tokens don't expire in our scheme
+            int(time.time()) + _REFRESH_TOKEN_TTL,
             authorization_code.bing_rt_enc,
         )
 
@@ -255,6 +282,9 @@ class GoogleAdsOAuthProvider:
     ) -> GadsRefreshToken | None:
         row = await asyncio.to_thread(_db.get_refresh_token_row, refresh_token)
         if row is None:
+            return None
+        if row.get("expires_at") and row["expires_at"] < int(time.time()):
+            await asyncio.to_thread(_db.delete_refresh_token, refresh_token)
             return None
         return GadsRefreshToken(
             token=row["token"],
@@ -301,7 +331,7 @@ class GoogleAdsOAuthProvider:
             refresh_token.google_rt_enc,
             refresh_token.customer_id,
             refresh_token.login_customer_id,
-            None,
+            int(time.time()) + _REFRESH_TOKEN_TTL,
             refresh_token.bing_rt_enc,
         )
 
