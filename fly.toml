@@ -1,5 +1,5 @@
 # fly.toml — replace "your-app-name" with your actual Fly app name
-app = "jarrah-ads-mcp"
+app = "jarrah-gads-mcp"
 primary_region = "syd"
 
 [build]
