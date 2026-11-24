@@ -147,13 +147,20 @@ middleware that rewrites `scope["path"]` from `/` to `/mcp` before the request r
 `resource_server_url` in `AuthSettings` is set to `f"{SERVER_URL}/mcp"` so the
 `/.well-known/oauth-protected-resource` metadata advertises the correct endpoint.
 
+### HTML responses in OAuth routes
+
+All OAuth HTML responses go through `_html(content, status_code)` in `server.py` (never raw
+`HTMLResponse`). `_html()` injects `_SECURITY_HEADERS` (CSP, `X-Frame-Options: DENY`,
+`X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`) on every response. Any new
+OAuth route that returns HTML must use `_html()`.
+
 ### Custom routes
 
 `@mcp.custom_route()` adds routes that bypass MCP auth middleware:
 - `GET /oauth/google/callback` — receives Google OAuth callback
 - `POST /oauth/select-account` — handles account picker form
 - `GET /oauth/microsoft/callback` — receives Microsoft OAuth callback; exchanges code for Bing refresh token
-- `GET /oauth/microsoft/skip` — completes the flow without a Bing token (Bing tools fall back to env)
+- `GET /oauth/microsoft/skip` — completes the flow without a Bing token (Bing tools unavailable for that session; `_bing_rt()` raises `RuntimeError`)
 - `GET /health` — health check
 
 ### Tools
@@ -224,7 +231,7 @@ To release a new version:
    The only expected match is the package source files. If `.env` appears, stop — do not upload.
 4. `PYPI_TOKEN=$(grep pypi_token .env | awk '{print $2}') && twine upload dist/* -u __token__ -p "$PYPI_TOKEN"`
 
-The PyPI token is stored as `pypi_token` in `.env`. If upload returns 403, the token has expired — generate a new one at pypi.org/manage/account/token/ scoped to `jarrah-ads-mcp`.
+The PyPI token is stored as `pypi_token` in `.env`. If upload returns 403, the token has expired — generate a new one at pypi.org/manage/project/jarrah-ads-mcp/settings/tokens/ (project-scoped).
 
 Note: Fly.io deploys install from local source via Docker (`pip install .`), so a PyPI release is not required to deploy.
 
@@ -241,6 +248,8 @@ Note: Fly.io deploys install from local source via Docker (`pip install .`), so 
 
 - `db.py` uses `threading.RLock()` (not `Lock()`) — `init_db()` acquires the lock then calls
   `_get_conn()` which also acquires it; a non-reentrant lock would deadlock on startup.
+- `delete_expired_access_tokens()` in `db.py` is called from `server.py` at startup (after
+  `init_db()`). Access tokens have a 1-hour TTL; this keeps the DB tidy across restarts.
 - `db.py` has a general-purpose `kv` table (keys: `bing_refresh_token`, `bing_refresh_token_source`) used to persist rotated Bing refresh tokens across restarts. Access via `kv_get(key)` / `kv_set(key, value)`.
 - The Fly.io free tier machine (256 MB) is too small — the Google Ads gRPC library spikes memory
   during tool calls. Run at 512 MB minimum.
@@ -251,3 +260,12 @@ Note: Fly.io deploys install from local source via Docker (`pip install .`), so 
   must write to the `_account_overrides` dict in `server.py` — DB updates alone are invisible to the
   running session.
 - `requirements.txt` does not include `bingads` — use `pip install -e .` (from `pyproject.toml`) for a complete install.
+
+## TODO
+
+Manual steps that can't be scripted:
+
+- **GitHub About field**: set to `https://jarrah.agency/tools/google-and-bing-ads-mcp/` on
+  github.com/jarrah-agency/jarrah-ads-mcp (Settings → About → Website).
+- **MCP Registry listing**: publish a `server.json` to the MCP Registry once the registry's
+  submission format is confirmed.

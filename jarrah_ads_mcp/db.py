@@ -298,6 +298,13 @@ def delete_access_token(token: str) -> None:
     _exec("DELETE FROM oauth_access_tokens WHERE token = ?", (token,))
 
 
+def delete_expired_access_tokens() -> None:
+    """Delete access tokens whose expiry has passed. Called at startup."""
+    _exec(
+        "DELETE FROM oauth_access_tokens WHERE expires_at IS NOT NULL AND expires_at < unixepoch()"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Refresh tokens
 # ---------------------------------------------------------------------------

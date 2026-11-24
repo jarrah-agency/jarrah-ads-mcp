@@ -52,11 +52,26 @@ log = logging.getLogger(__name__)
 SERVER_URL = os.environ.get("SERVER_URL", "http://localhost:8000").rstrip("/")
 PORT = int(os.environ.get("PORT", "8000"))
 
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'none'; style-src 'unsafe-inline'; "
+        "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+    ),
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
+
+def _html(content: str, status_code: int = 200) -> HTMLResponse:
+    return HTMLResponse(content, status_code=status_code, headers=_SECURITY_HEADERS)
+
 # ---------------------------------------------------------------------------
 # Initialise DB and build FastMCP server
 # ---------------------------------------------------------------------------
 
 _db.init_db()
+_db.delete_expired_access_tokens()
 
 provider = GoogleAdsOAuthProvider(server_url=SERVER_URL)
 
@@ -487,20 +502,22 @@ async def google_callback(request: Request) -> Response:
     google_state = request.query_params.get("state")
     google_code = request.query_params.get("code")
     error = request.query_params.get("error")
+    error_description = request.query_params.get("error_description")
 
     if error:
-        return HTMLResponse(
-            f"<h2>Google authorization failed</h2><p>{_h(error)}</p>",
+        desc = f"<p>{_h(error_description)}</p>" if error_description else ""
+        return _html(
+            f"<h2>Google authorization failed</h2><p>{_h(error)}</p>{desc}",
             status_code=400,
         )
 
     if not google_state or not google_code:
-        return HTMLResponse("<h2>Bad request</h2>", status_code=400)
+        return _html("<h2>Bad request</h2>", status_code=400)
 
     # Look up pending authorization
     pending = await asyncio.to_thread(_db.get_pending, google_state)
     if pending is None or pending["expires_at"] < int(time.time()):
-        return HTMLResponse("<h2>Authorization expired or not found</h2>", status_code=400)
+        return _html("<h2>Authorization expired or not found</h2>", status_code=400)
 
     # Exchange Google auth code for Google tokens
     google_redirect_uri = f"{SERVER_URL}/oauth/google/callback"
@@ -518,12 +535,12 @@ async def google_callback(request: Request) -> Response:
 
     if resp.status_code != 200:
         log.error("Google token exchange failed: %s", resp.text)
-        return HTMLResponse("<h2>Google token exchange failed</h2>", status_code=500)
+        return _html("<h2>Google token exchange failed</h2>", status_code=500)
 
     token_data = resp.json()
     google_refresh_token = token_data.get("refresh_token")
     if not google_refresh_token:
-        return HTMLResponse(
+        return _html(
             "<h2>Google did not return a refresh token.</h2>"
             "<p>Try revoking access at myaccount.google.com/permissions and retrying.</p>",
             status_code=400,
@@ -548,7 +565,7 @@ async def google_callback(request: Request) -> Response:
     if not accounts:
         # No accounts accessible — show error
         await asyncio.to_thread(_db.delete_pending, google_state)
-        return HTMLResponse(
+        return _html(
             "<h2>No Google Ads accounts found</h2>"
             "<p>The authenticated Google account does not have access to any Google Ads accounts.</p>",
             status_code=400,
@@ -578,13 +595,13 @@ async def select_account(request: Request) -> Response:
     selected_id = form.get("customer_id", "")
 
     if not google_state or not selected_id:
-        return HTMLResponse("<h2>Bad request</h2>", status_code=400)
+        return _html("<h2>Bad request</h2>", status_code=400)
 
     pending = await asyncio.to_thread(_db.get_pending, google_state)
     if pending is None or pending["expires_at"] < int(time.time()):
-        return HTMLResponse("<h2>Authorization expired</h2>", status_code=400)
+        return _html("<h2>Authorization expired</h2>", status_code=400)
     if not pending.get("google_rt_enc"):
-        return HTMLResponse("<h2>Session data missing</h2>", status_code=400)
+        return _html("<h2>Session data missing</h2>", status_code=400)
 
     # Re-list accounts to validate the selected_id and get login_customer_id
     google_rt_enc = pending["google_rt_enc"]
@@ -618,24 +635,26 @@ async def microsoft_callback(request: Request) -> Response:
     bing_state = request.query_params.get("state", "")
     ms_code = request.query_params.get("code")
     error = request.query_params.get("error")
+    error_description = request.query_params.get("error_description")
 
     if not bing_state:
-        return HTMLResponse("<h2>Bad request</h2>", status_code=400)
+        return _html("<h2>Bad request</h2>", status_code=400)
 
     if error:
         from urllib.parse import quote
-        return HTMLResponse(
-            f"<h2>Microsoft authorization failed</h2><p>{_h(error)}</p>"
+        desc = f"<p>{_h(error_description)}</p>" if error_description else ""
+        return _html(
+            f"<h2>Microsoft authorization failed</h2><p>{_h(error)}</p>{desc}"
             f"<p><a href='/oauth/microsoft/skip?state={quote(bing_state, safe='')}'>Continue with Google Ads only</a></p>",
             status_code=400,
         )
 
     if not ms_code:
-        return HTMLResponse("<h2>Bad request</h2>", status_code=400)
+        return _html("<h2>Bad request</h2>", status_code=400)
 
     pending = await asyncio.to_thread(_db.get_pending_by_bing_state, bing_state)
     if pending is None or pending["expires_at"] < int(time.time()):
-        return HTMLResponse("<h2>Authorization expired or not found</h2>", status_code=400)
+        return _html("<h2>Authorization expired or not found</h2>", status_code=400)
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
@@ -652,12 +671,12 @@ async def microsoft_callback(request: Request) -> Response:
 
     if resp.status_code != 200:
         log.error("Microsoft token exchange failed: %s", resp.text)
-        return HTMLResponse("<h2>Microsoft token exchange failed</h2>", status_code=500)
+        return _html("<h2>Microsoft token exchange failed</h2>", status_code=500)
 
     token_data = resp.json()
     bing_refresh_token = token_data.get("refresh_token")
     if not bing_refresh_token:
-        return HTMLResponse(
+        return _html(
             "<h2>Microsoft did not return a refresh token.</h2>",
             status_code=400,
         )
@@ -671,11 +690,11 @@ async def microsoft_skip(request: Request) -> Response:
     """Skip Microsoft OAuth and continue with Google Ads only (no Bing token)."""
     bing_state = request.query_params.get("state", "")
     if not bing_state:
-        return HTMLResponse("<h2>Bad request</h2>", status_code=400)
+        return _html("<h2>Bad request</h2>", status_code=400)
 
     pending = await asyncio.to_thread(_db.get_pending_by_bing_state, bing_state)
     if pending is None or pending["expires_at"] < int(time.time()):
-        return HTMLResponse("<h2>Authorization expired or not found</h2>", status_code=400)
+        return _html("<h2>Authorization expired or not found</h2>", status_code=400)
 
     return await _create_mcp_code(pending, None)
 
@@ -794,7 +813,7 @@ def _render_picker(google_state: str, accounts: list[dict], client_name: str) ->
   </form>
 </body>
 </html>"""
-    return HTMLResponse(html)
+    return _html(html)
 
 
 # ---------------------------------------------------------------------------
