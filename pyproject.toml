@@ -32,12 +32,9 @@ jarrah-ads-mcp = "jarrah_ads_mcp.server:main"
 packages = ["jarrah_ads_mcp"]
 
 [tool.hatch.build.targets.sdist]
-exclude = [
-    ".env",
-    ".env.*",
-    "*.db",
-    "dist/",
-    "fly.toml",
-    "Dockerfile",
-    "AGENTS.md",
+include = [
+    "jarrah_ads_mcp/",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
 ]
