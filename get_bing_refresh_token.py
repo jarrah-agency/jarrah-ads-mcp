@@ -1,7 +1,7 @@
 """One-shot script to get a Bing Ads OAuth refresh token.
 
 Usage:
-    python3 get_bing_refresh_token.py
+    BING_CLIENT_ID=... BING_CLIENT_SECRET=... python3 get_bing_refresh_token.py
 
 Opens a browser for Microsoft login, captures the callback on localhost:8080,
 exchanges the code for tokens, and prints the refresh token.
@@ -12,14 +12,14 @@ Prerequisites:
     → Authentication → Add a platform → Web → http://localhost:8080
 """
 import http.server
+import json
+import os
 import threading
 import urllib.parse
-import webbrowser
 import urllib.request
-import json
-
-CLIENT_ID = "f9229c70-7bec-4564-999f-7aa28d5613ab"
-CLIENT_SECRET = "REDACTED"
+import webbrowser
+CLIENT_ID = os.environ["BING_CLIENT_ID"]
+CLIENT_SECRET = os.environ["BING_CLIENT_SECRET"]
 REDIRECT_URI = "http://localhost:8080"
 SCOPE = "https://ads.microsoft.com/msads.manage offline_access"
 
