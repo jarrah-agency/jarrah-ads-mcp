@@ -520,6 +520,38 @@ def kv_set(key: str, value: str) -> None:
     )
 
 
+def replace_bing_refresh_token(old_token: str, new_token: str) -> int:
+    """Replace a rotated Bing refresh token on access and refresh session rows.
+
+    Fernet ciphertext includes a random IV, so rows are decrypted and compared
+    as plaintext. Returns how many rows were updated.
+    """
+    if not old_token or not new_token or old_token == new_token:
+        return 0
+    from jarrah_ads_mcp.auth_provider import decrypt, encrypt
+
+    new_enc = encrypt(new_token)
+    updated = 0
+    with _immediate_txn() as conn:
+        for table in ("oauth_access_tokens", "oauth_refresh_tokens"):
+            rows = conn.execute(
+                f"SELECT token, bing_rt_enc FROM {table} WHERE bing_rt_enc IS NOT NULL"
+            ).fetchall()
+            for row in rows:
+                try:
+                    current = decrypt(row["bing_rt_enc"])
+                except Exception:
+                    continue
+                if current != old_token:
+                    continue
+                conn.execute(
+                    f"UPDATE {table} SET bing_rt_enc = ? WHERE token = ?",
+                    (new_enc, row["token"]),
+                )
+                updated += 1
+    return updated
+
+
 def update_token_account(
     access_token: str,
     customer_id: str,

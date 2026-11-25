@@ -27,6 +27,14 @@ _env_refresh_token = os.environ.get("BING_REFRESH_TOKEN", "")
 _refresh_token: dict[str, str] = {"value": ""}
 _refresh_token_loaded = False
 
+# SearchAccounts has returned the same full page forever. Stop on a repeated
+# page, and never walk more than this many pages.
+_ACCOUNT_PAGE_SIZE = 100
+_MAX_ACCOUNT_PAGES = 25
+# urllib and the customer-management SOAP client. The bingads SDK otherwise
+# blocks for up to 300 seconds inside its own token refresh.
+_REQUEST_TIMEOUT_SECONDS = 20
+
 
 def _token_fingerprint(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
@@ -74,16 +82,64 @@ def _persist_refresh_token(new_rt: str) -> None:
         log.warning("Failed to persist rotated Bing refresh token", exc_info=True)
 
 
-def _exchange_refresh_token(bing_refresh_token: str | None = None) -> str:
+def _bing_signin_expired_error() -> RuntimeError:
+    """Microsoft rejected the refresh token. Reconnecting fixes this; a new developer token does not."""
+    return RuntimeError(
+        "Bing Ads sign-in expired or was rejected. "
+        "Reconnect Microsoft from the MCP client. "
+        "A new developer token is not required."
+    )
+
+
+def _persist_user_refresh_token(old_rt: str, new_rt: str) -> None:
+    """Write a rotated per-user refresh token onto the session rows that still hold the old one.
+
+    Microsoft invalidates the previous refresh token. The next load of those
+    rows must present the new token, or the customer list fails again.
+    """
+    try:
+        from jarrah_ads_mcp import db as _db
+
+        _db.init_db()
+        updated = _db.replace_bing_refresh_token(old_rt, new_rt)
+        log.info("Persisted rotated Bing Ads refresh token on %s session rows", updated)
+    except Exception:
+        log.warning("Failed to persist rotated per-user Bing refresh token", exc_info=True)
+    _refresh_live_session_token(old_rt, new_rt)
+
+
+def _refresh_live_session_token(old_rt: str, new_rt: str) -> None:
+    """Update the token already loaded for this MCP session.
+
+    FastMCP calls load_access_token once per session, so a database update
+    alone leaves the in-memory credential pointing at the invalidated token.
+    """
+    try:
+        from mcp.server.auth.middleware.auth_context import get_access_token
+
+        token = get_access_token()
+    except Exception:
+        return
+    if getattr(token, "bing_refresh_token", None) != old_rt:
+        return
+    try:
+        token.bing_refresh_token = new_rt
+    except Exception:
+        log.warning("Could not update in-memory Bing refresh token", exc_info=True)
+
+
+def _exchange_refresh_token(bing_refresh_token: str | None = None) -> tuple[str, str]:
     """Exchange a refresh token for an access token using urllib directly.
 
     Bypasses the bingads SDK's internal OAuth flow so we control the exact
     scope string and avoid any SDK version quirks.
 
-    When bing_refresh_token is provided (per-user token), it is used directly
-    and rotated tokens are NOT persisted (the caller holds the token lifecycle).
-    When bing_refresh_token is None, the shared env/persisted token is used and
-    any rotation is written to SQLite.
+    Returns ``(access_token, refresh_token)``. Microsoft may rotate the refresh
+    token. A per-user rotation is written onto the session rows. The shared
+    env token is written to the kv table instead.
+
+    The Microsoft call times out after 20 seconds. ``invalid_grant`` means the
+    sign-in was rotated or rejected, and the caller must reconnect.
     """
     import json
     import urllib.error
@@ -107,23 +163,37 @@ def _exchange_refresh_token(bing_refresh_token: str | None = None) -> str:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req) as r:
+        with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT_SECONDS) as r:
             tokens = json.loads(r.read())
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode()
+        body = exc.read().decode(errors="replace")
+        error_code = ""
+        try:
+            error_code = json.loads(body).get("error") or ""
+        except json.JSONDecodeError:
+            error_code = ""
+        if error_code == "invalid_grant" or "invalid_grant" in body:
+            raise _bing_signin_expired_error() from exc
         raise RuntimeError(f"Bing Ads token exchange failed ({exc.code}): {body}") from exc
+    except TimeoutError as exc:
+        raise RuntimeError(
+            f"Bing Ads token exchange timed out after {_REQUEST_TIMEOUT_SECONDS} seconds"
+        ) from exc
 
     if "access_token" not in tokens:
         raise RuntimeError(f"Bing Ads token exchange returned no access_token: {tokens}")
 
-    new_rt = tokens.get("refresh_token")
-    # Only persist rotation for the shared env token, not per-user tokens
-    if new_rt and bing_refresh_token is None and new_rt != _refresh_token["value"]:
-        log.info("Bing Ads shared refresh token rotated")
-        _refresh_token["value"] = new_rt
-        _persist_refresh_token(new_rt)
+    new_rt = tokens.get("refresh_token") or rt
+    if new_rt != rt:
+        if bing_refresh_token is None:
+            log.info("Bing Ads shared refresh token rotated")
+            _refresh_token["value"] = new_rt
+            _persist_refresh_token(new_rt)
+        else:
+            log.info("Bing Ads per-user refresh token rotated")
+            _persist_user_refresh_token(rt, new_rt)
 
-    return tokens["access_token"]
+    return tokens["access_token"], new_rt
 
 
 def _patch_service_headers() -> None:
@@ -182,11 +252,10 @@ def _auth(
     from bingads.authorization import OAuthTokens
 
     _patch_service_headers()
-    access_token = _exchange_refresh_token(bing_refresh_token)
+    access_token, rt_for_sdk = _exchange_refresh_token(bing_refresh_token)
 
     # oauth_tokens is a read-only property; pass the tokens to the constructor.
-    # Use the per-user token if provided, otherwise fall back to the shared env token.
-    rt_for_sdk = bing_refresh_token or _refresh_token["value"]
+    # rt_for_sdk is the token Microsoft just issued, including a rotation.
     oauth = OAuthWebAuthCodeGrant(
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
@@ -215,16 +284,28 @@ def _as_list(value):
     return [value]
 
 
-def list_accounts(bing_refresh_token: str | None = None) -> list[dict]:
-    """Return {id, name, number, customer_id, status} for all accessible accounts."""
+def _customer_management_client(authorization_data):
+    """Customer-management SOAP client that fails fast when Microsoft rejects the token.
+
+    ``refresh_oauth_tokens_automatically`` makes the SDK call Microsoft itself
+    and wait up to 300 seconds. This server already exchanged the refresh token.
+    """
     from bingads import ServiceClient
 
     svc = ServiceClient(
         "CustomerManagementService",
         version=13,
-        authorization_data=_auth(bing_refresh_token=bing_refresh_token),
+        authorization_data=authorization_data,
         environment="production",
+        timeout=_REQUEST_TIMEOUT_SECONDS,
     )
+    svc.refresh_oauth_tokens_automatically = False
+    return svc
+
+
+def list_accounts(bing_refresh_token: str | None = None) -> list[dict]:
+    """Return {id, name, number, customer_id, status} for all accessible accounts."""
+    svc = _customer_management_client(_auth(bing_refresh_token=bing_refresh_token))
     user = svc.GetUser(UserId=None).User
     predicates = {
         "Predicate": [
@@ -233,18 +314,35 @@ def list_accounts(bing_refresh_token: str | None = None) -> list[dict]:
     }
 
     found: list = []
-    page_index = 0
-    page_size = 100
-    while True:
+    seen_ids: set[str] = set()
+    page_size = _ACCOUNT_PAGE_SIZE
+    stopped_early = False
+    for page_index in range(_MAX_ACCOUNT_PAGES):
         resp = svc.SearchAccounts(
             PageInfo={"Index": page_index, "Size": page_size},
             Predicates=predicates,
         )
         batch = _as_list(getattr(resp, "AdvertiserAccount", None))
-        found.extend(batch)
-        if len(batch) < page_size:
+        page_ids = [str(a.Id) for a in batch]
+        # A full page of ids we already have means SearchAccounts is repeating
+        # itself. Another request would never finish.
+        if page_ids and all(account_id in seen_ids for account_id in page_ids):
+            log.warning(
+                "Bing Ads SearchAccounts repeated account ids on page %s; stopping",
+                page_index,
+            )
+            stopped_early = True
             break
-        page_index += 1
+        for account, account_id in zip(batch, page_ids):
+            if account_id in seen_ids:
+                continue
+            seen_ids.add(account_id)
+            found.append(account)
+        if len(batch) < page_size:
+            stopped_early = True
+            break
+    if not stopped_early:
+        log.warning("Bing Ads SearchAccounts stopped after %s pages", _MAX_ACCOUNT_PAGES)
 
     accounts = [
         {
