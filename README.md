@@ -8,7 +8,7 @@ The hosted server is [https://jarrah-gads-mcp.fly.dev](https://jarrah-gads-mcp.f
 
 ## Connect
 
-Add this URL as a remote MCP server in Claude or any client that supports streamable HTTP and OAuth:
+Add this URL as a remote MCP server in Claude, Cursor, ChatGPT, VS Code, or any client that supports streamable HTTP and OAuth:
 
 ```text
 https://jarrah-gads-mcp.fly.dev
@@ -16,7 +16,7 @@ https://jarrah-gads-mcp.fly.dev
 
 The MCP endpoint is `/mcp`. Clients that POST to the site root are forwarded there.
 
-On first use the client opens Google sign-in, then Microsoft sign-in for Bing Ads access. One accessible Google Ads account is selected automatically; several accounts show a picker. Users who skip the Microsoft step can still use all Google Ads tools. `switch_account` changes the Google Ads account for the rest of the session, including accounts under an MCC.
+On first use the client opens Google sign-in. One accessible Google Ads account is selected automatically; several accounts show a picker. After Google sign-in, the server redirects to Microsoft for Bing Ads access. Skipping the Microsoft step (or connecting with a server where `BING_CLIENT_ID` is not set) still gives full access to all Google Ads tools — Bing tools will return an error until a Microsoft account is connected. `switch_account` changes the Google Ads account for the rest of the session, including accounts under an MCC.
 
 ## Tools
 
@@ -44,7 +44,7 @@ On first use the client opens Google sign-in, then Microsoft sign-in for Bing Ad
 
 ## Bing Ads
 
-Bing Ads tools use per-user Microsoft OAuth. During the connect flow, after Google sign-in you are redirected to Microsoft to authorise access to your own Microsoft Advertising account. The Bing token is stored encrypted alongside your Google token and used for all subsequent Bing tool calls.
+Bing Ads tools use per-user Microsoft OAuth. During the connect flow, after Google sign-in you are redirected to Microsoft to authorise access to your own Microsoft Advertising account. The Bing token is stored encrypted alongside your Google token and used for all subsequent Bing tool calls. The Microsoft step only appears when the server is configured with `BING_CLIENT_ID`; Google-only deployments skip it entirely.
 
 ## Run your own server
 
@@ -64,9 +64,9 @@ SERVER_URL=http://localhost:8000 python3 -m jarrah_ads_mcp.server
 | `SERVER_URL` | Yes | Public base URL, no trailing slash, e.g. `https://your-app.fly.dev` |
 | `FERNET_KEY` | Recommended | Encrypts refresh tokens in SQLite. Without it, a new key is generated on startup and stored tokens are lost on restart |
 | `BING_DEVELOPER_TOKEN` | Yes (Bing) | Microsoft Advertising developer token |
-| `BING_CLIENT_ID` | Yes (Bing) | Azure AD app client ID |
-| `BING_CLIENT_SECRET` | Yes (Bing) | Azure AD app client secret |
-| `BING_REFRESH_TOKEN` | No | Fallback for sessions that skip the Microsoft sign-in step |
+| `BING_CLIENT_ID` | No | Azure AD app client ID. When unset, sign-in finishes after Google and Bing tools are unavailable |
+| `BING_CLIENT_SECRET` | Yes (Bing) | Azure AD app client secret. Required when `BING_CLIENT_ID` is set |
+| `BING_REFRESH_TOKEN` | Yes (Bing) | Bootstrap token for the per-server token-rotation chain in `bing_ads.py`. Generate with `python3 get_bing_refresh_token.py` |
 | `PORT` | No | HTTP port (default `8000`) |
 | `DB_PATH` | No | SQLite path (default `gads_mcp.db`) |
 
