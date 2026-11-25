@@ -147,7 +147,8 @@ async def run_gaql(query: str) -> str:
       segments.date DURING LAST_30_DAYS
       segments.date BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD'
 
-    Limit results with LIMIT N (max 100).
+    At most 100 rows are returned. A note is appended when the result was
+    truncated. Zero, false, and empty-string field values are kept.
 
     Common resources: campaign, ad_group, keyword_view, search_term_view,
     geographic_view, user_location_view, gender_view, age_range_view,
@@ -297,10 +298,14 @@ async def get_campaign_metrics(start_date: str, end_date: str) -> list[dict]:
 
 @mcp.tool()
 async def get_conversion_actions() -> list[dict]:
-    """List enabled conversion actions with 90-day conversion volume.
+    """List enabled conversion actions with trailing 90-day conversion volume.
 
-    Returns name, type, category, and volume_90d for each conversion action,
-    sorted by volume descending.
+    volume_90d is metrics.all_conversions over volume_start..volume_end
+    inclusive (volume_days calendar dates ending today, not calendar months).
+    Each action includes id, resource_name, and name. Actions that share a
+    display name are separate rows. volume_status is "ok" or "unknown".
+    When the volume query fails, volume_90d is null and volume_error is set;
+    null is not zero. Sorted by volume descending, unknowns last.
     """
     refresh_token, customer_id, login_customer_id = _creds()
 

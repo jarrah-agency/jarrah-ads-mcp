@@ -2,7 +2,7 @@
 
 import logging
 import os
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 from google.ads.googleads.client import GoogleAdsClient
@@ -106,17 +106,41 @@ def list_client_accounts(
     return accounts
 
 
+# Inclusive calendar days ending today. 90 days is today and the 89 days before it.
+VOLUME_WINDOW_DAYS = 90
+
+
+def conversion_volume_window(today: date | None = None) -> tuple[date, date]:
+    """Return the inclusive trailing window the conversion tool reports.
+
+    The end date is ``today`` (default: the local date). The start date is
+    ``VOLUME_WINDOW_DAYS - 1`` days earlier, so the window contains exactly
+    that many calendar dates. It is not aligned to month boundaries.
+    """
+    end = today or date.today()
+    start = end - timedelta(days=VOLUME_WINDOW_DAYS - 1)
+    return start, end
+
+
 def list_conversion_actions(
     refresh_token: str,
     customer_id: str,
     login_customer_id: str | None = None,
 ) -> list[dict]:
-    """List enabled conversion actions with 90-day volume."""
+    """List enabled conversion actions with a trailing 90-day volume.
+
+    Each action is keyed by its resource name, so two actions that share a
+    display name stay separate. ``volume_90d`` is all_conversions over
+    ``volume_start``..``volume_end`` (inclusive). When that query fails,
+    ``volume_status`` is ``unknown``, ``volume_90d`` is null, and
+    ``volume_error`` carries the message — the volume is not reported as 0.
+    """
     client = build_client(refresh_token, login_customer_id=login_customer_id)
     ga_service = client.get_service("GoogleAdsService")
 
     action_query = """
         SELECT
+            conversion_action.resource_name,
             conversion_action.id,
             conversion_action.name,
             conversion_action.type,
@@ -125,43 +149,57 @@ def list_conversion_actions(
         FROM conversion_action
         WHERE conversion_action.status = 'ENABLED'
     """
-    actions = {}
+    actions: dict[str, dict] = {}
     response = ga_service.search_stream(customer_id=customer_id, query=action_query)
     for batch in response:
         for row in batch.results:
-            actions[row.conversion_action.name] = {
-                "id": str(row.conversion_action.id),
-                "name": row.conversion_action.name,
-                "type": row.conversion_action.type.name,
-                "category": row.conversion_action.category.name,
+            action = row.conversion_action
+            resource_name = action.resource_name or f"id:{action.id}"
+            actions[resource_name] = {
+                "id": str(action.id),
+                "resource_name": action.resource_name,
+                "name": action.name,
+                "type": action.type.name,
+                "category": action.category.name,
                 "volume_90d": 0,
+                "volume_status": "ok",
+                "volume_days": VOLUME_WINDOW_DAYS,
             }
 
-    today = date.today()
-    start = today.replace(day=1)
-    if start.month > 3:
-        start = start.replace(month=start.month - 3)
-    else:
-        start = start.replace(year=start.year - 1, month=start.month + 9)
+    start, end = conversion_volume_window()
+    for action in actions.values():
+        action["volume_start"] = start.isoformat()
+        action["volume_end"] = end.isoformat()
+
+    if not actions:
+        return []
 
     volume_query = f"""
         SELECT
-            segments.conversion_action_name,
+            segments.conversion_action,
             metrics.all_conversions
         FROM campaign
-        WHERE segments.date BETWEEN '{start.isoformat()}' AND '{today.isoformat()}'
+        WHERE segments.date BETWEEN '{start.isoformat()}' AND '{end.isoformat()}'
     """
     try:
         response = ga_service.search_stream(customer_id=customer_id, query=volume_query)
         for batch in response:
             for row in batch.results:
-                name = row.segments.conversion_action_name
-                if name in actions:
-                    actions[name]["volume_90d"] += row.metrics.all_conversions
+                resource_name = row.segments.conversion_action
+                action = actions.get(resource_name)
+                if action is not None:
+                    action["volume_90d"] += row.metrics.all_conversions
     except Exception as e:
         log.warning("Could not fetch conversion volumes: %s", e)
+        for action in actions.values():
+            action["volume_90d"] = None
+            action["volume_status"] = "unknown"
+            action["volume_error"] = str(e)
 
-    return sorted(actions.values(), key=lambda a: a["volume_90d"], reverse=True)
+    return sorted(
+        actions.values(),
+        key=lambda a: (a["volume_90d"] is None, -(a["volume_90d"] or 0)),
+    )
 
 
 def fetch_campaign_metrics(
