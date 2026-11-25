@@ -30,7 +30,14 @@ python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().
 BING_CLIENT_ID=... BING_CLIENT_SECRET=... python3 get_bing_refresh_token.py
 ```
 
-There is no test suite.
+```bash
+# Install dev dependencies and run tests (no network calls required)
+pip install -e ".[dev]"
+pytest
+
+# Run a single test file
+pytest tests/test_token_exchange.py -v
+```
 
 ## Environment variables
 
@@ -42,7 +49,7 @@ There is no test suite.
 | `SERVER_URL` | Yes | Deployed base URL, e.g. `https://jarrah-gads-mcp.fly.dev` — no trailing slash |
 | `FERNET_KEY` | Recommended | Base64 Fernet key for encrypting Google refresh tokens in SQLite. Auto-generates one if absent (tokens lost on restart). |
 | `BING_DEVELOPER_TOKEN` | Yes (Bing) | Microsoft Advertising developer token |
-| `BING_CLIENT_ID` | Yes (Bing) | Azure AD app client ID |
+| `BING_CLIENT_ID` | No | Azure AD app client ID. When unset, sign-in finishes after Google and Bing tools are unavailable |
 | `BING_CLIENT_SECRET` | Yes (Bing) | Azure AD app client secret |
 | `BING_REFRESH_TOKEN` | Yes (Bing) | Bootstrap token used only by `bing_ads.py` for the token-rotation persistence chain. MCP tool calls always use the per-user token; sessions without a Microsoft connection get a clear error from `_bing_rt()`. |
 | `PORT` | No | HTTP port (default 8000) |
@@ -60,7 +67,7 @@ jarrah_ads_mcp/
   server.py        — FastMCP server with auth, tools, and custom routes
   google_ads.py    — GoogleAdsClient wrapper + fetch_* functions returning DataFrames
   google_ads_tools.py — run_gaql() async wrapper with JSON output
-  bing_ads.py      — Bing Ads SOAP client wrapper (per-user OAuth; falls back to env token)
+  bing_ads.py      — Bing Ads SOAP client wrapper (per-user OAuth only)
 ```
 
 Root-level `server.py`, `google_ads.py`, and `google_ads_tools.py` are the original stdio-based
@@ -108,7 +115,8 @@ Google → GET /oauth/google/callback
   → lists accessible Google Ads accounts
   → single account: auto-selects; multiple: shows HTML account picker
   → stores account selection + bing_state in pending row
-  → redirects to Microsoft OAuth
+  → if BING_CLIENT_ID unset: creates MCP auth code immediately (no Bing token)
+  → if BING_CLIENT_ID set: redirects to Microsoft OAuth
 Microsoft → GET /oauth/microsoft/callback
   → exchanges Microsoft code for Bing refresh token
   → creates MCP auth code → redirects back to MCP client redirect_uri
@@ -153,6 +161,14 @@ All OAuth HTML responses go through `_html(content, status_code)` in `server.py`
 `HTMLResponse`). `_html()` injects `_SECURITY_HEADERS` (CSP, `X-Frame-Options: DENY`,
 `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`) on every response. Any new
 OAuth route that returns HTML must use `_html()`.
+
+### Redirect URI allowlist
+
+`_is_allowed_redirect_uri()` in `auth_provider.py` enforces an explicit allowlist. Loopback
+(`localhost`, `127.0.0.1`, `::1`) HTTP/HTTPS on any port is always allowed. Remote HTTPS clients
+are matched against `_ALLOWED_REDIRECT_URIS` (exact strings) and `_CHATGPT_CALLBACK_RE` (pattern).
+To support a new MCP client, add its callback to `_ALLOWED_REDIRECT_URIS`. Arbitrary custom URI
+schemes are rejected — only `cursor://anysphere.cursor-mcp/oauth/callback` is explicitly allowed.
 
 ### Custom routes
 
@@ -248,6 +264,9 @@ Note: Fly.io deploys install from local source via Docker (`pip install .`), so 
 
 - `db.py` uses `threading.RLock()` (not `Lock()`) — `init_db()` acquires the lock then calls
   `_get_conn()` which also acquires it; a non-reentrant lock would deadlock on startup.
+- `db.py` runs in autocommit mode (`isolation_level = None`). Token exchange and rotation use
+  `_immediate_txn()` which issues `BEGIN IMMEDIATE` / `COMMIT` explicitly. Do not call `_exec()`
+  inside an `_immediate_txn()` block — use the yielded `conn` directly.
 - `delete_expired_access_tokens()` in `db.py` is called from `server.py` at startup (after
   `init_db()`). Access tokens have a 1-hour TTL; this keeps the DB tidy across restarts.
 - `db.py` has a general-purpose `kv` table (keys: `bing_refresh_token`, `bing_refresh_token_source`) used to persist rotated Bing refresh tokens across restarts. Access via `kv_get(key)` / `kv_set(key, value)`.
